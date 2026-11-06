@@ -5,8 +5,33 @@ Start a C++ project, add a dependency, build it — without writing CMake.
 ```bash
 cppm init MyApp
 cd MyApp
+cppm add github:fmtlib/fmt@11.1.4
 cppm build
 ```
+
+## Install
+
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OWNER/cppm/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/OWNER/cppm/main/install.ps1 | iex
+```
+
+With Go installed:
+
+```sh
+go install github.com/OWNER/cppm/cmd/cppm@latest
+```
+
+Both installers verify the release checksum, fall back to building from source when no prebuilt
+binary matches your platform, and tell you if the install directory is not on your `PATH`. Then run
+`cppm doctor` to check your toolchain.
 
 ## What cppm is
 
@@ -204,16 +229,27 @@ Run `cppm doctor` to check all of them.
 ## Build from source
 
 ```bash
+git clone https://github.com/OWNER/cppm && cd cppm
 go build -o cppm ./cmd/cppm
 go test ./...
 ```
 
-No third-party Go dependencies — stdlib only.
+Needs Go 1.25+. **No third-party Go dependencies** — stdlib only, so `go build` works offline.
+
+## Contributing
+
+Bug reports, recipes and patches are welcome. See
+[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — adding a recipe for a library whose CMake targets
+cppm cannot discover is the most useful small contribution.
+
+## License
+
+[MIT](LICENSE) © Mehdi Shokohifar
 
 ## Design notes
 
-[docs/evaluation.md](docs/evaluation.md) — the pre-implementation review, including measurements of
-what CMake will and will not tell you about a dependency's targets.
+[docs/architecture.md](docs/architecture.md) — how cppm is built and why: file ownership, the
+five-tier target discovery design, what CMake will and will not tell you about a dependency's
+targets, and the reasoning behind each scope boundary.
 
-[docs/architecture.md](docs/architecture.md) — schemas, the five-tier target discovery design, and
-the reasoning behind each scope boundary.
+[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — how to build, test and submit changes.

@@ -1,633 +1,272 @@
-# cppm — Preliminary Architecture
+# cppm — Architecture
 
-Companion to [evaluation.md](evaluation.md). Revises §4, §6, §7, §8 and §11 of
-[proposal.md](../proposal.md) for a Go implementation.
+How cppm is put together, and why it is put together that way. For using cppm, see the
+[README](../README.md); for working on it, [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Implementation language: **Go 1.27+** · Generated build system: **CMake 3.24+** · Backend: **Ninja**
+Implementation: **Go 1.27+** · Generates: **CMake 3.24+** · Backend: **Ninja** when available
 
 ---
 
-## 0. What cppm is
+## 1. What cppm is
 
 **A project scaffolder, a dependency pinner, and a wrapper over CMake presets and the build.**
 
-It is *not* a CMake replacement and does not claim to generate complete or final CMake. The goal is
-to get a developer from nothing to a building C++ project without knowing CMake syntax. Editing
-`CMakeLists.txt` by hand afterwards is an expected and supported outcome.
+It is not a CMake replacement and does not claim to generate complete or final CMake. The goal is to
+get a developer from nothing to a building C++ project without knowing CMake syntax. Editing
+`CMakeLists.txt` by hand afterwards is an expected, supported outcome.
 
-This boundary is what makes the design tractable: target inference can be an 80%-accurate
-convenience with a clear failure path (see
-[evaluation.md](evaluation.md) §2.5) rather than a correctness guarantee it could not meet.
+That boundary is what makes the design tractable. Target discovery can be an ~80%-accurate
+convenience with a clear hand-off for the rest, rather than a correctness guarantee it could not
+meet.
 
-### v1 scope — deliberately three things
+### Deliberately out of scope
 
-**Start a project. Download a dependency. Wire it into CMake.** That is the whole of v1.
-
-| In v1 | Out of v1 |
+| Not done | Why |
 |---|---|
-| `init` — scaffold a project that builds | Transitive dependency pinning |
-| Set the C++ standard (§3c) | Version ranges or constraint solving |
-| `add` / `remove` — git + local deps | Any interpretation of version strings (§3b) |
-| Pin to a commit in `cppm.lock` | Conflict detection and resolution |
-| Generate the dependency `.cmake` | Dependency providers (CMake 3.24) |
-| `build` — wrap `cmake --preset` | Windows / macOS / MSVC support |
-| `list`, `info`, `doctor`, `clean` | Non-CMake libraries |
-
-This is not a reduced version of the real tool — it *is* the tool for a first release. A developer
-who can run `cppm init`, `cppm add github:fmtlib/fmt@11.1.4`, `cppm build` and get a working binary
-without reading CMake documentation has received the whole value proposition.
-
-**What this scope buys.** Every A-tier risk in [evaluation.md](evaluation.md) §6b was a consequence
-of promising more than "download and wire it up":
-
-- **A1** (lockfile misses transitive deps) → a documented limitation, not a defect. No dependency
-  provider needed, which removes the single largest unspiked piece of engineering.
-- **A2** (`add_subdirectory` pollution) → inherent to FetchContent. `doctor` warns; cppm does not
-  try to fix it.
-- **A3** (MSVC runtime mismatch) → out of scope. Linux first.
-- **B1** (version constraints) → collapses. v1 accepts a **tag, branch or commit**, and nothing
-  else. No semver comparison, so `20240722.0` and `release-2.30.9` stop being a problem. Bare
-  `cppm add fmt` picks the newest tag by git creation date, which needs no version parsing at all.
-- **B2** (conflict UX) → deferred. Document first-declaration-wins and move on.
-- **C1** (CMake keyword matrix) → becomes a free choice, since the 3.24 floor existed *only* for
-  dependency providers.
-
-What survives is the part that is genuinely hard to change later: §1's file-ownership boundary and
-§5's generated interface.
+| Version solving or ranges | A version is an opaque git ref; see §4 |
+| Transitive dependency pinning | cppm pins what cppm fetches; a dependency's own fetches are its business |
+| Conflict detection | FetchContent has no solver — first declaration wins, silently |
+| Non-CMake libraries | Autotools and bare Makefiles need a hand-written wrapper |
+| A package registry | Dependencies are git URLs; there is no index to maintain |
 
 ---
 
-## 1. Design rules
+## 2. Design rules
 
 1. **cppm never owns the build.** It generates CMake and shells out. CMake and Ninja do the work.
-2. **Generated and hand-written files never mix.** `CMakeLists.txt` is the user's file after `init`
-   and is never rewritten. cppm owns `.cppm/generated/cppm.cmake` and `CMakePresets.json`.
-2a. **A manifest setting must be one cppm can actually apply.** A setting that lives in a
-   user-owned file can never be changed by `sync`, which makes the manifest field decorative. So
-   each setting lives wherever cppm can own it:
+2. **Generated and hand-written files never mix.** `CMakeLists.txt` is the user's after `init` and
+   is never rewritten. cppm owns `.cppm/generated/cppm.cmake` and `CMakePresets.json`.
+3. **A manifest setting must be one cppm can actually apply.** A setting living in a user-owned file
+   could never be changed by `sync`, which would make the manifest field decorative. So each
+   setting lives wherever cppm can own it:
 
-   | Setting | Where it goes | Why |
+   | Setting | Where | Why there |
    |---|---|---|
-   | `cxx.standard`, `required`, `extensions` | generated `cppm.cmake` | an include after `project()` can still set these |
-   | `toolchain.cxx`, `.c`, `.generator` | `CMakePresets.json` | `CMAKE_CXX_COMPILER` must be set *before* `project()`, so an include is too late |
+   | `cxx.standard`, `.required`, `.extensions` | generated `cppm.cmake` | an include after `project()` can still set these |
+   | `toolchain.cxx`, `.c`, `.generator` | `CMakePresets.json` | `CMAKE_CXX_COMPILER` must be set **before** `project()`, so an include is too late |
+   | `cmake.buildTypes`, `.exportCompileCommands` | `CMakePresets.json` | cache variables are applied at configure time |
    | dependencies | generated `cppm.cmake` | must precede the targets that link them |
-   | `project()` name and version, targets, sources | `CMakeLists.txt` | `project()` can only be called there, so cppm cannot apply changes — `doctor` detects the drift instead |
-2c. **Prefer ASK over a confident guess.** When inference is not confident, say so and name the
-   exact line to edit. A wrong link target that configures successfully is the worst outcome the
-   tool can produce; "I don't know, add this one line" is an acceptable one.
-3. **The lockfile is the source of truth for builds.** The manifest states intent; the lock states
-   what will actually be fetched. `sync` honours the lock; only `update` moves it.
-4. **Every write is atomic.** Temp file in the same directory, then rename.
-5. **No shell, ever.** `exec.Command` with an argv slice, `--` terminators, validated inputs.
-6. **Idempotence is testable.** `sync` twice must produce byte-identical output. Make this a test.
+   | `project()` name and version, targets, sources | `CMakeLists.txt` | `project()` can only be called there, so cppm cannot apply changes — `doctor` reports the drift instead |
+
+4. **Prefer declining over a confident guess.** When inference is unsure, say so and name the exact
+   line to edit. A wrong link target that configures successfully is the worst thing cppm can
+   produce; "I don't know, add this one line" is acceptable.
+5. **Every write is atomic.** Temp file in the same directory, then rename. A half-written
+   `cppm.lock` is worse than none.
+6. **No shell, ever.** `exec.Command` with an argv slice. See §7.
+7. **Defaults are written out explicitly.** `init` spells out every setting at its default value. A
+   setting nobody can see is one nobody can change.
+8. **`sync` is idempotent.** Running it twice produces byte-identical output, and that is tested.
 
 ---
 
-## 2. Manifest schema — `cppm.json`
+## 3. The problem at the centre: finding the link target
 
-Changes from the proposal are marked.
+cppm's most important single operation is knowing what string to put in `target_link_libraries`.
+Everything else is bookkeeping by comparison.
 
-```json
-{
-  "schema": 1,
-  "name": "MyProject",
-  "version": "0.1.0",
+**CMake will not tell you.** Asking a configured project for a dependency's targets via
+`BUILDSYSTEM_TARGETS` returns only the raw underlying targets — for fmt, `fmt;fmt-header-only`.
+The name users are documented to link, `fmt::fmt`, is an `ALIAS`, and CMake exposes no property or
+command that enumerates aliases.
 
-  "cxx": { "standard": 20, "required": true },
-  "cmake": { "minimum": "3.24" },
+It will, however, **confirm** a name you already have: `if(TARGET fmt::fmt)` works reliably.
 
-  "targets": {
-    "MyProject": {
-      "kind": "executable",
-      "sources": ["src/main.cpp"],
-      "dependencies": ["fmt", "json"]
-    }
-  },
-
-  "dependencies": {
-    "fmt": {
-      "source": "git",
-      "url": "https://github.com/fmtlib/fmt.git",
-      "version": "11.1.4",
-      "targets": ["fmt::fmt"],
-      "options": { "FMT_TEST": "OFF", "FMT_DOC": "OFF" }
-    },
-    "json": {
-      "source": "git",
-      "url": "https://github.com/nlohmann/json.git",
-      "version": "3.11.3"
-    },
-    "MyLibrary": {
-      "source": "path",
-      "path": "../MyLibrary"
-    }
-  },
-
-  "overrides": {}
-}
-```
-
-**Deviations from the proposal, and why**
-
-| Change | Reason |
-|---|---|
-| `"source": "git"` + explicit `url`, replacing `"source": "github"` + `"repository"` | `github:` is CLI sugar, not a schema concept. Keeping the schema host-agnostic means GitLab, Codeberg and self-hosted work with no schema change. The CLI expands `github:fmtlib/fmt` into the full URL at parse time. |
-| `options` per dependency | Required, not optional — [evaluation.md](evaluation.md) §3.2. Without it the second dependency you add builds its own test suite. |
-| `targets` per dependency | Tier-1 explicit override for discovery, which must exist from day one. Omitted means "infer". |
-| `targets` top-level section | Supports multiple executables/libraries and per-target dependency sets, replacing the blunt `cppm_link_dependencies(X)` — §3.5. |
-| `overrides` | Declared conflict resolution — §3.6. Empty in the common case. |
-| `"schema": 1` | Lets the manifest be migrated later without guesswork. |
-| `cxx` as an object | `"language": "cxx20"` is a string that must be parsed; a standard and a flag are two facts. |
-
-`source` is an open enum: `git`, `path`, and later `archive` / `find_package`.
-
----
-
-## 3. Lockfile schema — `cppm.lock`
-
-```json
-{
-  "schema": 1,
-  "generated_by": "cppm 0.1.0",
-  "packages": [
-    {
-      "name": "fmt",
-      "source": "git",
-      "url": "https://github.com/fmtlib/fmt.git",
-      "requested": "11.1.4",
-      "resolved_ref": "refs/tags/11.1.4",
-      "commit": "123913715afeb8a437e6388b4473fcc4753e1c9a",
-      "targets": ["fmt::fmt"],
-      "target_origin": "inferred",
-      "options": { "FMT_TEST": "OFF", "FMT_DOC": "OFF" },
-      "dependencies": [],
-      "shallow_ok": true
-    }
-  ]
-}
-```
-
-- `commit` is always a full 40-character hash. A tag is never sufficient — tags move.
-- `target_origin` is one of `explicit` / `recipe` / `inferred`, so `cppm info` can tell the user
-  *why* a target name was chosen and `doctor` can flag guesses.
-- `shallow_ok` records whether shallow fetch succeeded for this host, avoiding a repeat probe of a
-  server that rejects it — [evaluation.md](evaluation.md) §2.3.
-- `packages` is an **array sorted by name**, not an object. Deterministic serialisation means clean
-  Git diffs.
-- Local `path` dependencies have no commit and are never locked to a hash — they are editable by
-  design.
-
----
-
-## 3b. Version policy — refs are opaque
-
-**cppm does not parse, compare, order or interpret version strings.** A version is an opaque git
-ref. If a library does not follow semver, that is not cppm's concern and not cppm's bug.
-
-```bash
-cppm add github:fmtlib/fmt@11.1.4          # tag
-cppm add github:gabime/spdlog@v1.x         # branch
-cppm add github:fmtlib/fmt@123913715af     # commit
-```
-
-Resolution is mechanical: try the ref as a tag, then a branch, then a commit; resolve whatever
-matches to a full commit hash; store both the ref and the hash in the lock. No version grammar is
-involved at any point.
-
-**Consequences, all of them deliberate:**
-
-- **No ranges.** `^11.0`, `~1.2`, `>=3` are not supported. Supporting them would require knowing
-  what a version *means*, which is exactly the responsibility being declined.
-- **`cppm update` re-resolves refs; it does not find newer versions.** For a tag pin it is normally
-  a no-op. For a branch it fetches the new HEAD. "Find me a newer release" is not offered, because
-  that needs version ordering.
-- **A moved tag is reported, not followed.** If `11.1.4` resolves to a different commit than the
-  lock records, the tag was re-pointed. That is worth telling the user loudly — it is a
-  reproducibility event, and detecting it needs no version semantics, just hash comparison.
-- **Date-based, calendar and prefixed tags all just work** — `20240722.0`, `release-2.30.9`,
-  `boost-1.86.0` — because none of them is ever compared.
-
-**The one place a choice is unavoidable** is bare `cppm add fmt` with no ref. v1 picks the **newest
-tag by git creation date**, which requires no version parsing, filters obvious pre-releases
-(`rc`, `alpha`, `beta`, `-pre`) as a courtesy, and then **echoes exactly what it chose**:
+So discovery is: generate candidates, rank them, let CMake verify. Five tiers, first hit wins:
 
 ```
-$ cppm add github:fmtlib/fmt
-  resolved: no ref given -> newest tag 11.1.4 (2025-01-04) -> 1239137
-  pinned in cppm.lock. use @<ref> to choose a different one.
+Tier 1  EXPLICIT ── manifest "targets" / --target ────── always wins
+Tier 2  RECIPE ──── embedded curated database ───────── known libraries, instant
+Tier 3  INFERRED ── static source scan + rank + veto ── ~80%, no configure needed
+Tier 4  PROBED ──── configure-time enumerate + verify ─ recovers macro-built targets
+Tier 5  ASK ─────── prompt with ranked candidates ───── ambiguous or unresolved
 ```
 
-Known limitation, documented rather than fixed: a project that back-tags an old series (releasing
-`v1.9.5` after `v2.0.0`) will have the older tag chosen, because creation date and version order
-disagree. Printing the choice is the mitigation; the user passes an explicit ref if it is wrong.
+### Tier 3, and the two things that make it work
 
----
+Measured at 8 of 10 real libraries correct with **zero confident errors** (fmt, spdlog,
+nlohmann/json, Catch2, Eigen, SDL2, cxxopts, tomlplusplus correct; googletest and abseil declined).
+Two non-obvious steps are load-bearing:
 
-## 3c. C++ standard
-
-The standard is cppm's to set, since not knowing CMake is the problem being solved. The manifest
-carries it, `init` writes it into `CMakeLists.txt`, and it is **not** regenerated afterwards (§1
-rule 2) — that file is the user's.
-
-```json
-"cxx": { "standard": 20, "required": true, "extensions": false }
-```
+**Variable resolution.** Target names are routinely assembled from variables, so a naive grep finds
+nothing at all:
 
 ```cmake
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)   # see below — not optional
+# nlohmann/json — no literal "nlohmann_json::nlohmann_json" exists anywhere to find
+add_library(${NLOHMANN_JSON_TARGET_NAME} INTERFACE)
+add_library(${PROJECT_NAME}::${NLOHMANN_JSON_TARGET_NAME} ALIAS ${NLOHMANN_JSON_TARGET_NAME})
 ```
 
-**These must appear before the dependency include**, so dependencies inherit them.
+Resolving `project()` and single-valued `set()` definitions, then expanding `${VAR}`, took measured
+accuracy from 60% to 80%. Three of ten libraries produced *zero* candidates without it.
 
-**Measured: the parent standard does propagate to dependencies.** In a project setting
-`CMAKE_CXX_STANDARD 20` and then fetching fmt and spdlog, both dependencies compiled as C++20. The
-setting is inherited through `add_subdirectory`, so one declaration covers the whole build.
+**A hard veto, not a penalty.** abseil ranked `absl::abseil_test_dll` first and recommended it with
+confidence — a build that would configure, link, and be wrong. Markers like `test`, `bench`, `mock`,
+`example` and `dll` now disqualify a candidate outright; if nothing survives, cppm answers ASK. The
+marker is ignored when it also appears in the package's own name, so a library called *googletest*
+is not vetoed by its own name.
 
-**`CMAKE_CXX_EXTENSIONS OFF` is the part that is easy to miss.** It defaults to **ON**, and the same
-build produced inconsistent dialects:
+The metric to protect in CI is therefore **`WRONG == 0`**, not the hit rate.
 
-| Target | Dialect | Why |
-|---|---|---|
-| the project's own `app` | `-std=gnu++20` | inherited the ON default |
-| fmt | `-std=gnu++20` | inherited the ON default |
-| spdlog | `-std=c++20` | sets `CXX_EXTENSIONS OFF` on its own targets |
+### Tier 3's limit, and why Tiers 2 and 4 exist
 
-So a developer who never asked for GNU extensions gets them in their own code, and dependencies
-disagree with each other. The practical cost is code that builds with GCC and Clang and then fails
-under MSVC or strict `-std=c++20` — precisely the class of problem a tool aimed at non-experts
-should close by default. `init` therefore always writes `CMAKE_CXX_EXTENSIONS OFF`, and `doctor`
-flags a project that lacks it.
-
-Dependencies that need a *different* standard than the project are out of scope: a dependency that
-requires more than the project sets will fail to compile with a clear compiler error, and raising
-`cxx.standard` is the user's fix.
-
----
-
-## 4. Target discovery
-
-The core mechanism. Three tiers, first hit wins.
-
-```
-┌─ Tier 1  EXPLICIT ── manifest "targets" ──────────────────── always wins
-├─ Tier 2  RECIPE ──── embedded curated DB (go:embed) ──────── known libraries, instant
-├─ Tier 3  INFERRED ── static source scan + rank + veto ────── 80%, no configure needed
-├─ Tier 4  PROBED ──── configure-time enumerate + verify ───── recovers macro-based projects
-└─ Tier 5  ASK ─────── prompt with ranked candidates ───────── ambiguous or unresolved
-```
-
-Tiers 1–3 are fast and cover the overwhelming majority. Tier 4 costs one CMake configure. Tier 5
-involves the user, which for ambiguous packages is the right answer rather than a failure.
-
-**Tier 3 pipeline** — measured at **80% correct, 0 confident errors** across ten real libraries
-([evaluation.md](evaluation.md) §2.5). Prototype: [tools/phase0](../tools/phase0/main.go).
-
-1. **Clone** into the global mirror cache at the locked commit.
-2. **Resolve variables.** Collect the top-level `project()` name and single-valued `set()`
-   definitions, shallowest file first, then expand `${VAR}` with a bounded number of passes.
-   *Not optional* — target names are routinely assembled from variables, and adding this step alone
-   moved the measurement from 60% to 80%.
-3. **Scan** `CMakeLists.txt` and `*.cmake` for `add_library(<name> ALIAS <real>)` and
-   `add_library(<name> INTERFACE|STATIC|SHARED|MODULE|OBJECT)`, skipping `test/`, `example/`,
-   `benchmark/`, `third_party/`, `extern/`, `vendor/` and `doc/` subtrees. This recovers the
-   namespaced names CMake itself cannot enumerate (§2.1). Names still containing `$` after
-   expansion are discarded as unusable.
-4. **Veto.** Disqualify outright — not merely demote — any candidate whose bare name contains
-   `test`, `bench`, `mock`, `example`, `sample`, `fuzz`, `dll` or `buildall`. The marker is ignored
-   when it also appears in the package's own name, so *googletest* is not vetoed by its own name.
-   This exists because a soft penalty was insufficient: abseil ranked `absl::abseil_test_dll` first
-   and recommended it with confidence.
-5. **Rank** the survivors: `+50` namespaced, `+20` alias, `+40`/`+20` bare name matching the package,
-   `+25` namespace matching the package, `+15` for the canonical `ns::ns` form, `+5` interface,
-   `-30` for `header_only`/`static`/`shared`/`main`, minus a small length penalty. Package identity
-   is matched against **both** the dependency name and the dependency's own `project()` name, which
-   is what makes `nlohmann_json::nlohmann_json` reachable from a dependency called `json`.
-6. **Gate on confidence.** Answer only if the top candidate survived the veto *and* is plausibly
-   related to the package. Otherwise report ASK — no guess. Protect `WRONG == 0` in CI; it matters
-   more than the hit rate.
-7. **Probe** the winner at configure time with `if(TARGET x)`. Reliable — verified with no false
-   positives across seven candidate names.
-8. **Persist** to the lock as `target_origin: inferred` and warn once, so the user knows a guess was
-   made and can pin it.
-
-**Tier 3's limit.** The 20% it misses declare targets through helper macros rather than literal
-`add_library` calls, so no scanner can read them:
+The ~20% it misses build their targets inside helper macros, which no scanner can read:
 
 ```cmake
-add_library(${cmake_package_name}::${name} ALIAS ${name})  # parameters, not variables
+add_library(${cmake_package_name}::${name} ALIAS ${name})  # function parameters
 cxx_library(gtest "${cxx_strict}" src/gtest-all.cc)        # custom macro
 ```
 
-These fall through to Tier 4.
+Those values exist only while CMake is running. But the **namespace** is a literal in the source
+(`set(cmake_package_name GTest ...)`, `add_library(absl::${...} ALIAS ...)`), and after a configure
+`BUILDSYSTEM_TARGETS` yields the raw names the macros generated. Crossing the two and probing with
+`if(TARGET)` recovers the answer — verified on googletest, which Tier 3 scores at zero candidates:
+
+```
+raw targets      = gtest;gtest_main;gmock;gmock_main
+verified aliases = GTest::gtest;GTest::gtest_main;GTest::gmock;GTest::gmock_main
+```
+
+### What the recipe database is for
+
+Not a registry — a shortcut, ~25 entries. It carries two things nothing else can supply:
+
+- **Targets built by helper macros** (`GTest::gtest_main`, `absl::base`).
+- **Cache options with no discoverable signal at all.** spdlog silently compiles its own bundled
+  copy of fmt unless `SPDLOG_FMT_EXTERNAL=ON`; abseil builds against a different standard than your
+  project unless `ABSL_PROPAGATE_CXX_STD=ON`. No probe can find these out.
+
+User recipes in `$CPPM_RECIPES_DIR` or `~/.config/cppm/recipes` override the embedded set, so a
+wrong entry is fixable without waiting for a release.
+
+### Tier 5 is not always a fallback
+
+For a genuinely ambiguous library, asking is the *correct* answer. `Catch2::Catch2` versus
+`Catch2::Catch2WithMain` is a decision only the user can make. Prompts are gated on stdin being a
+terminal, because a prompt in CI hangs the build forever; `--non-interactive` and `--target` cover
+scripted use.
 
 ---
 
-### Tier 4 — configure-time probe (fallback)
+## 4. Versions are opaque refs
 
-Verified on googletest, which Tier 3 scores at zero candidates
-([evaluation.md](evaluation.md) §2.6).
+**cppm never parses, orders or compares a version string.** A version is a git ref. If a library
+ignores semver, that is not cppm's concern.
 
-Macro-based projects hide the *bare* name but leak the **namespace** as a literal
-(`set(cmake_package_name GTest ...)`, `add_library(absl::${...} ALIAS ...)`). After a configure,
-`BUILDSYSTEM_TARGETS` yields the raw names the macros generated. Combining them resolves the case:
+Resolution is pure lookup: try the ref as a tag, then a branch, then a commit; dereference annotated
+tags to the commit they point at; record the full 40-character hash. Consequences, all intended:
 
-1. Harvest namespace candidates statically, plus the `project()` name.
-2. Configure once, then read `BUILDSYSTEM_TARGETS` for each dependency subdirectory.
-3. Generate the cross product `<ns>::<raw>`, plus a `<ns>_`-prefix-stripped variant
-   (`absl_base` → `absl::base`).
-4. Verify each with `if(TARGET)` — the one question CMake answers reliably.
-5. Write the winners to the lock so the cost is paid once.
+- **No ranges.** `^11.0`, `>=3` would require knowing what a version *means*.
+- **`update` re-resolves refs; it does not find newer releases.** A branch advances, a tag normally
+  does not, a commit never moves.
+- **A moved tag is reported, not followed.** Pure hash comparison, no version semantics — and a
+  published release changing underneath you is worth knowing about.
+- **Calendar and prefixed tags just work** — `20240722.0`, `release-2.30.9`, `boost-1.86.0` — because
+  none of them is ever compared.
 
-```
-SPIKE_RAW              = gtest;gtest_main;gmock;gmock_main
-SPIKE_VERIFIED_ALIASES = GTest::gtest;GTest::gtest_main;GTest::gmock;GTest::gmock_main
-```
-
-Costs one configure, which `build` performs anyway. So `add` stays fast via Tiers 1–3 and Tier 4
-runs only for the hard minority.
+The one unavoidable choice is bare `cppm add fmt` with no ref: cppm lists the tags and asks, or uses
+the default branch when non-interactive. It does not pick a "latest" for you.
 
 ---
 
-### Tier 5 — ask the user
-
-When Tier 4 leaves more than one plausible answer, or none, `cppm add` prompts with the ranked
-candidates. For genuinely ambiguous packages this is the *correct* resolution rather than a
-fallback: `Catch2::Catch2` vs `Catch2::Catch2WithMain` is a user choice, not a discoverable fact.
+## 5. Files and ownership
 
 ```
-$ cppm add github:catchorg/Catch2@v3.7.1
-  Catch2 exposes more than one linkable target:
-    1) Catch2::Catch2WithMain   test library + main()      (recommended)
-    2) Catch2::Catch2           test library, you supply main()
-    3) enter a target name manually
-    4) skip — I will wire it myself in CMakeLists.txt
-  choice [1]:
+~/.cache/cppm/src/<host>/<owner>/<repo>/<commit12>/   global, keyed by commit
+
+MyProject/
+├── cppm.json          intent                      you      committed
+├── cppm.lock          resolution                  cppm     committed
+├── CMakeLists.txt     targets, project()          YOU      committed, never rewritten
+├── CMakePresets.json  compiler, generator, types  cppm     committed, rewritten by sync
+├── CMakeUserPresets.json  your own presets        YOU      never touched
+├── src/ include/
+├── .cppm/generated/cppm.cmake                     cppm     git-ignored, rewritten by sync
+└── build/<preset>/                                cppm     git-ignored
 ```
 
-Rules, because this must never hang a build:
+The cache is **global and keyed by commit**: entries are immutable, never need invalidating, and ten
+projects using fmt do not mean ten clones.
 
-- Prompt **only** when stdin is a TTY; otherwise record `target_origin: unresolved`, warn, and let
-  the configure-time `FATAL_ERROR` deliver the message.
-- `--non-interactive` forces that path explicitly, for CI.
-- `--target <name>` supplies the answer up front, so scripted use never needs the prompt.
-- Option 4 is always available and is a supported end state — §0.
+`sync` may rewrite `CMakePresets.json`, so it first checks the presets schema's own `vendor` field
+for cppm's stamp and refuses to discard a hand-written file.
 
-**Recipe entry format** (embedded, also user-extensible via `~/.config/cppm/recipes/`):
+### The generated interface is a public API
 
-```json
-{
-  "url": "https://github.com/gabime/spdlog.git",
-  "targets": ["spdlog::spdlog"],
-  "options": { "SPDLOG_BUILD_EXAMPLE": "OFF", "SPDLOG_FMT_EXTERNAL": "ON" },
-  "requires": ["fmt"],
-  "notes": "SPDLOG_FMT_EXTERNAL avoids a second bundled copy of fmt"
-}
-```
-
-That `SPDLOG_FMT_EXTERNAL` entry is exactly the per-package knowledge that §2.4 showed cannot be
-inferred.
-
----
-
-## 5. Generated CMake
-
-### `.cppm/generated/cppm_dependencies.cmake`
-
-```cmake
-# Generated by cppm 0.1.0 — DO NOT EDIT.
-# Regenerate with: cppm sync
-include_guard(GLOBAL)
-include(FetchContent)
-
-# Feature detection — the generator must target a RANGE of CMake versions.
-set(CPPM_FC_KEYWORDS "")
-if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.25)
-  list(APPEND CPPM_FC_KEYWORDS SYSTEM)
-endif()
-if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
-  list(APPEND CPPM_FC_KEYWORDS EXCLUDE_FROM_ALL)
-endif()
-
-set(CPPM_DEPENDENCIES "")
-
-# ---- fmt @ 11.1.4 ----
-set(FMT_TEST OFF CACHE BOOL "" FORCE)
-set(FMT_DOC  OFF CACHE BOOL "" FORCE)
-# Keyword availability differs by CMake version, so the generator emits what the
-# project's floor supports:  SYSTEM is 3.25+, EXCLUDE_FROM_ALL is 3.28+.
-FetchContent_Declare(fmt
-  GIT_REPOSITORY "https://github.com/fmtlib/fmt.git"
-  GIT_TAG        123913715afeb8a437e6388b4473fcc4753e1c9a
-  GIT_SHALLOW    ON
-  ${CPPM_FC_KEYWORDS}   # expands to "SYSTEM EXCLUDE_FROM_ALL" where supported
-)
-set(CPPM_TARGETS_fmt "fmt::fmt")
-list(APPEND CPPM_DEPENDENCIES fmt)
-
-FetchContent_MakeAvailable(fmt)
-
-# ---- verification ----
-foreach(_dep IN LISTS CPPM_DEPENDENCIES)
-  foreach(_t IN LISTS CPPM_TARGETS_${_dep})
-    if(NOT TARGET ${_t})
-      message(FATAL_ERROR
-        "cppm: dependency '${_dep}' does not provide target '${_t}'.\n"
-        "cppm could not determine the right target name. Either pin it in cppm.json:\n"
-        "    \"${_dep}\": { ..., \"targets\": [\"<real::target>\"] }\n"
-        "or link it yourself in CMakeLists.txt — cppm will not overwrite your edits.\n"
-        "Run 'cppm info ${_dep}' to see the candidates that were considered.")
-    endif()
-  endforeach()
-endforeach()
-
-function(cppm_link_dependencies target)
-  set(_deps ${ARGN})
-  if(NOT _deps)
-    set(_deps ${CPPM_DEPENDENCIES})
-  endif()
-  foreach(_dep IN LISTS _deps)
-    target_link_libraries(${target} PRIVATE ${CPPM_TARGETS_${_dep}})
-  endforeach()
-endfunction()
-```
-
-Three things the proposal's sketch lacks:
-
-- **`EXCLUDE_FROM_ALL`** keeps dependency install rules and stray targets out of your build.
-- **Options set before `FetchContent_Declare`**, which is the only point at which they take effect.
-- **A verification loop** that fails configure with an actionable message naming the exact JSON to
-  edit. Given that discovery is heuristic, the failure path is a primary user experience, not an
-  edge case.
-
-`cppm_link_dependencies` accepts an explicit dependency list, addressing §3.5, while bare
-`cppm_link_dependencies(App)` still links everything for the simple case.
-
-### This generated interface is cppm's public API
-
-Worth stating plainly, because it is the one thing in a minimal v1 that is genuinely expensive to
-get wrong.
-
-Internal architecture can be rewritten freely. But the moment a user has
-`cppm_link_dependencies(App)` and `include(.cppm/generated/cppm_dependencies.cmake)` sitting in a
-`CMakeLists.txt` that cppm promised never to rewrite (§1 rule 2), those names are a compatibility
-surface. Changing them later breaks every existing project, and cppm cannot migrate them because
-it does not own that file.
-
-So the small surface is deliberate, and should stay small:
+Those names live inside a `CMakeLists.txt` that cppm promised never to rewrite, so cppm **cannot
+migrate them later**. The surface is deliberately four names:
 
 | Name | Guarantee |
 |---|---|
-| `.cppm/generated/cppm_dependencies.cmake` | the include path, stable |
-| `cppm_link_dependencies(<target> [deps...])` | the linking entry point |
-| `CPPM_TARGETS_<dep>` | per-dependency target list, for manual wiring |
-| `CPPM_DEPENDENCIES` | the full dependency name list |
+| `.cppm/generated/cppm.cmake` | the include path |
+| `cppm_link_dependencies(<target> [deps...])` | linking entry point |
+| `CPPM_TARGETS_<dep>` | one dependency's targets, for manual wiring |
+| `CPPM_DEPENDENCIES` | all dependency names |
 
-Everything else in the generated file is an implementation detail and should be prefixed `_cppm_`
-so it is visibly private. Decide this before `init` ships, not after.
-
-### Dependency provider — `.cppm/generated/cppm_provider.cmake`
-
-Injected via `CMAKE_PROJECT_TOP_LEVEL_INCLUDES` so that `find_package(fmt)` calls made *inside*
-dependencies are redirected to the cppm-managed copy rather than the system. This is the CMake 3.24
-mechanism from §3.3 and the only clean answer to nested dependency resolution. Phase 3.
+Everything else is prefixed `_cppm_` to mark it private, and a test enforces that.
 
 ---
 
-## 6. Go package layout
+## 6. Package layout
 
 ```
-cppm/
-├── go.mod
-├── cmd/cppm/main.go                 thin — flag wiring only
-├── internal/
-│   ├── cli/                         cobra commands, one file each
-│   │   ├── root.go  init.go  add.go  remove.go  sync.go
-│   │   └── update.go  build.go  list.go  info.go  doctor.go  clean.go
-│   ├── manifest/                    cppm.json: load, validate, save, migrate
-│   ├── lockfile/                    cppm.lock: load, save, deterministic order
-│   ├── resolve/                     constraint → ref → commit; tag normalisation (§3.8)
-│   ├── provider/                    Provider interface; git.go, path.go
-│   ├── vcs/                         git CLI wrapper, mirror cache, shallow fallback
-│   ├── discover/                    source scan, candidate ranking, probe (§4)
-│   ├── recipes/                     embedded recipe DB + user overrides
-│   ├── cmakegen/                    dependency .cmake, presets, CMakeLists template
-│   ├── buildrunner/                 cmake --preset orchestration
-│   ├── doctor/                      toolchain and project diagnostics
-│   └── atomic/                      write-temp-and-rename
-└── testdata/script/                 testscript CLI integration tests
+cmd/cppm/              flag wiring only
+internal/
+├── cli/               one file per command; stdlib flag, no framework
+├── manifest/          cppm.json: load, validate, save, deterministic output
+├── lockfile/          cppm.lock: sorted packages, clean diffs
+├── project/           walks up to find cppm.json, like git
+├── vcs/               spec parsing, ref resolution, git CLI, source cache
+├── discover/          scan, resolve variables, veto, rank, confidence gate
+├── recipes/           embedded curated database (go:embed) + user overrides
+├── cmakegen/          CMakeLists template, presets, the managed include
+├── toolchain/         locates cmake/ninja/git/compiler; runs them
+├── atomicfile/        write-temp-and-rename
+└── e2e/               drives the real binary against real CMake
 ```
 
-Mapping from the proposal's §11 C++ layout is one-to-one, with `discover/` and `recipes/` added as
-the consequence of §2.1/§2.4, and `atomic/` promoted to its own package because every writer needs
-it.
+**No third-party Go dependencies.** A tool whose purpose is to relieve dependency pain builds with
+`go build` and nothing else. The CLI surface is small and regular enough not to need a framework.
 
-**Key interface**
+Key extension point:
 
 ```go
+// A new dependency source is a new implementation and nothing else changes.
 type Provider interface {
-    // Resolve turns a version constraint into an immutable, reproducible pin.
     Resolve(ctx context.Context, dep manifest.Dependency) (lockfile.Package, error)
-    // Materialize ensures the source is present locally, using the cache.
     Materialize(ctx context.Context, pkg lockfile.Package) (path string, err error)
 }
 ```
 
-Two implementations in the MVP: `git` and `path`. New sources become new implementations with no
-change elsewhere.
+---
+
+## 7. Security posture
+
+cppm executes git against user-supplied URLs and refs, so these are enforced rather than hoped for:
+
+- **No shell.** `exec.Command` takes an argv slice; nothing is ever concatenated into a command line.
+- **Leading `-` rejected** in refs, URLs and paths — git would read them as flags
+  (`--upload-pack=...` is remote code execution).
+- **`ext::` and `fd::` transports refused** — they make git execute arbitrary commands.
+- **Cache paths sanitised** so a crafted URL cannot escape the cache root via `..`.
+- **`GIT_TERMINAL_PROMPT=0`** on every call; otherwise a private or mistyped repository blocks on a
+  credential prompt and cppm appears to hang.
+- **Values quoted when emitted into CMake**, escaping `"`, `\` and `$`.
 
 ---
 
-## 7. On-disk layout
+## 8. Known limitations
 
-```
-~/.cache/cppm/
-├── git/github.com/fmtlib/fmt.git        bare mirror, shared across all projects
-└── recipes/                              downloaded recipe updates
-
-MyProject/
-├── cppm.json          committed
-├── cppm.lock          committed
-├── CMakeLists.txt     committed — user-owned, never rewritten after init
-├── CMakePresets.json  committed — generated, but stable
-├── .cppm/             gitignored
-│   └── generated/
-│       ├── cppm_dependencies.cmake
-│       └── cppm_provider.cmake
-└── build/             gitignored
-```
-
-Global cache rather than the proposal's per-project `.cppm/dependencies/` — §3.7. `cppm init` writes
-the `.gitignore` entries.
-
----
-
-## 8. Command behaviour
-
-| Command | Network | Writes | Notes |
-|---|---|---|---|
-| `init` | no | manifest, lock, CMakeLists, presets, src, .gitignore | `init .` supported |
-| `add` | yes | manifest, lock, generated | Resolves ref→commit, clones to cache, infers targets. **May prompt** (Tier 5); `--target` / `--non-interactive` suppress it |
-| `remove` | no | manifest, lock, generated | |
-| `sync` | yes if lock incomplete | lock, generated | **Honours existing lock.** Idempotent |
-| `update` | yes | lock, generated | The only command that moves pins |
-| `build` | via sync | build/ | `cmake --preset`; `--release` `--debug` `--clean` |
-| `list` | no | — | |
-| `info <dep>` | no | — | Shows `target_origin`, so guesses are visible |
-| `doctor` | no | — | Toolchain, manifest/lock drift, inferred-target warnings |
-| `clean` | no | build/ | `--all` also clears the global cache |
-
-The critical distinction, understated in the proposal: **`sync` must never change a pin.** If the
-lock is valid it is obeyed exactly; it only fills gaps. Only `update` re-resolves. Getting this wrong
-destroys reproducibility, so it should be an explicit test.
-
----
-
-## 9. Revised roadmap
-
-**Phase 0 — Discovery measurement. ✅ DONE.** [tools/phase0](../tools/phase0/main.go) clones ten real
-libraries and reports inference accuracy with no recipes: **8 HIT, 2 ASK, 0 WRONG**. Exit criterion
-(>80% ⇒ inference-first) met, so the architecture is inference-first with a small recipe DB. The
-scan/veto/rank/gate logic is promoted to `internal/discover` in Phase 3, and the harness becomes its
-regression test — its corpus is the natural fixture set.
-
-**Phase 1 — Skeleton that builds something.** `go.mod`, cobra root, manifest + lock read/write with
-atomic writes and deterministic ordering, `init`, and a generated `CMakeLists.txt` that configures
-and builds a hello-world with zero dependencies. End-to-end from day one.
-
-**Phase 2 — Git dependencies.** `vcs` git wrapper with argv safety and shallow fallback, global
-mirror cache, tag→commit resolution, `add` / `remove`, lockfile pinning. Acceptance: `cppm add
-github:fmtlib/fmt@11.1.4 && cppm build` works.
-
-**Phase 3 — Discovery and CMake integration.** The three tiers, the recipe DB, the verification
-loop, `sync`, local `path` dependencies, and the dependency provider. The heart of the project.
-Acceptance: the proposal's §13 scenario — fmt + nlohmann/json + a local library — works verbatim.
-
-**Phase 4 — Build and presets.** Presets generation, `build` as a preset wrapper, debug/release,
-`doctor`, `list`, `info`.
-
-**Phase 5 — Hardening.** Conflict detection and reporting, circular local-dependency detection,
-cross-platform CI (Linux/macOS/Windows × GCC/Clang/MSVC), testscript coverage, idempotence tests,
-docs and release binaries.
-
-Phases 1–2 are mostly mechanical. Phase 3 carries nearly all the risk, which is why Phase 0 exists.
-
----
-
-## 10. Known limitations to state publicly
-
-Being explicit in the README about these is better than implying capability:
-
-0. **cppm does not replace CMake and does not generate complete CMake.** It gets a project started
-   and building without CMake expertise. Non-trivial projects will eventually edit
-   `CMakeLists.txt` directly, and cppm is designed to stay out of the way when they do — it never
-   rewrites that file after `init`.
-1. **No version solving.** cppm pins; it does not solve. Conflicts are reported, not resolved.
-2. **Transitive deduplication is best-effort** and depends on recipe knowledge —
-   [evaluation.md](evaluation.md) §2.4.
-3. **Non-CMake libraries need a recipe or a manual wrapper.** Autotools and Makefile projects are
-   out of scope for the MVP.
-4. **Inferred target names are ~80% accurate.** When inference is not confident it declines and
-   tells you the one line to add, rather than guessing — [evaluation.md](evaluation.md) §2.5.
-5. **Shallow fetch depends on server support,** with automatic fallback — §2.3.
+1. **cppm does not replace CMake** and does not generate complete CMake. Non-trivial projects will
+   edit `CMakeLists.txt`; cppm stays out of the way when they do.
+2. **No version solving.** Conflicts are not detected; FetchContent's first declaration wins.
+3. **The lockfile covers only direct dependencies.** A dependency's own fetches are neither pinned
+   nor recorded, so `cppm.lock` is not a complete record of the build.
+4. **`add_subdirectory` means dependency code is part of your build.** Dependencies can set cache
+   variables, mutate flags, and collide on target names. `SYSTEM` and `EXCLUDE_FROM_ALL` mitigate
+   some of it; target collisions have no clean workaround.
+5. **Inferred target names can be wrong** (~80% accurate). cppm declines rather than guessing when
+   unsure, and labels an inferred name as inferred.
+6. **Shallow fetch depends on server support**, with automatic fallback to full history.
+7. **Windows and macOS are built and tested in CI but less exercised** than Linux. MSVC runtime
+   library mismatches across dependencies are not yet handled.

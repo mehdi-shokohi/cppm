@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -78,7 +79,7 @@ func TestInitThenBuildProducesAnExecutable(t *testing.T) {
 
 	mustRun(t, proj, "build")
 
-	exe := filepath.Join(proj, "build", "debug", "HelloApp")
+	exe := filepath.Join(proj, "build", "debug", exeName("HelloApp"))
 	if _, err := os.Stat(exe); err != nil {
 		t.Fatalf("no executable produced at %s", exe)
 	}
@@ -276,6 +277,14 @@ func TestCommandsWorkFromSubdirectory(t *testing.T) {
 	if !strings.Contains(out, "no dependencies") {
 		t.Errorf("list did not find the project from a subdirectory: %s", out)
 	}
+}
+
+// exeName returns a built target's file name for the host platform.
+func exeName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+	return base
 }
 
 func readFile(t *testing.T, path string) string {

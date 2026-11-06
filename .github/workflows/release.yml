@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}_${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          name="cppm"
+          [ "$GOOS" = "windows" ] && name="cppm.exe"
+          mkdir -p dist
+          # -trimpath keeps build paths out of the binary; -s -w drop the symbol
+          # table and DWARF data, which is a large size win for a CLI.
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
+            -o "dist/$name" ./cmd/cppm
+
+      - name: Package
+        id: package
+        run: |
+          set -eu
+          base="cppm_${{ matrix.goos }}_${{ matrix.goarch }}"
+          cd dist
+          cp ../LICENSE ../README.md .
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -q "../$base.zip" cppm.exe LICENSE README.md
+            echo "asset=$base.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "../$base.tar.gz" cppm LICENSE README.md
+            echo "asset=$base.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        # One checksums.txt covering every asset, which both installers verify.
+        run: |
+          cd artifacts
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: cppm ${{ steps.version.outputs.version }}
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            Linux and macOS:
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+            ```
+
+            Windows (PowerShell):
+
+            ```powershell
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+            ```
+
+            With Go installed:
+
+            ```sh
+            go install github.com/${{ github.repository }}/cmd/cppm@${{ steps.version.outputs.version }}
+            ```
+
+            Every asset's SHA-256 is in `checksums.txt`, which both installers verify automatically.
+
+            Then:
+
+            ```sh
+            cppm doctor
+            cppm init MyApp && cd MyApp && cppm build
+            ```

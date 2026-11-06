@@ -1,13 +1,20 @@
-# cppm generated + build output
+# Build output
+/cppm
+/cppm.exe
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# cppm-managed (in projects created by cppm)
 .cppm/
 build/
-# Go
-/cppm
-/bin/
-*.test
-# Phase 0 scratch
-/tools/phase0/_work/
 
-# probe spike build output
-/tools/phase0/probe_spike/build/
-/tools/phase0/probe_spike/out.log
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+compile_commands.json

@@ -10,7 +10,7 @@
 //
 // So discovery is: generate candidate names from the source, rank them, and let
 // CMake verify the winner. Measured at 8 of 10 real libraries correct with zero
-// confident errors; see docs/evaluation.md section 2.5. The two it misses build
+// confident errors; see docs/architecture.md section 3. The two it misses build
 // their targets inside helper macros, which no scanner can read, and are
 // handled by the recipe database and by configure-time probing.
 //

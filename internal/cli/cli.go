@@ -148,10 +148,14 @@ commands:
 	for _, c := range commands {
 		fmt.Fprintf(w, "    %-*s  %s\n", width, c.Name, c.Summary)
 	}
+	var aliasPairs []string
 	for _, c := range commands {
 		if len(c.Aliases) > 0 {
-			fmt.Fprintf(w, "\naliases: %s -> %s\n", strings.Join(c.Aliases, ", "), c.Name)
+			aliasPairs = append(aliasPairs, fmt.Sprintf("%s = %s", strings.Join(c.Aliases, ", "), c.Name))
 		}
+	}
+	if len(aliasPairs) > 0 {
+		fmt.Fprintf(w, "\naliases: %s\n", strings.Join(aliasPairs, "; "))
 	}
 	fmt.Fprint(w, `
 run 'cppm help <command>' for details on one command.

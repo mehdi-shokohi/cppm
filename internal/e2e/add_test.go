@@ -85,7 +85,7 @@ func TestAddThenBuildLinksTheDependency(t *testing.T) {
 	}
 	mustRun(t, proj, "build")
 
-	exe := filepath.Join(proj, "build", "debug", "App")
+	exe := filepath.Join(proj, "build", "debug", exeName("App"))
 	got, err := exec.Command(exe).CombinedOutput()
 	if err != nil {
 		t.Fatalf("built binary failed: %v\n%s", err, got)

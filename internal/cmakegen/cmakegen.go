@@ -270,6 +270,11 @@ type preset struct {
 type buildPreset struct {
 	Name            string `json:"name"`
 	ConfigurePreset string `json:"configurePreset"`
+	// Configuration is required by multi-config generators (Visual Studio,
+	// Xcode), which ignore CMAKE_BUILD_TYPE entirely and pick the
+	// configuration at build time. Single-config generators ignore it, so
+	// setting it always is correct and makes Windows and macOS work.
+	Configuration string `json:"configuration,omitempty"`
 }
 
 // vendorStamp marks the file as cppm-generated. CMakePresets.json reserves the
@@ -341,8 +346,8 @@ func Presets(m *manifest.Manifest) (string, error) {
 			mk("release", "Release"),
 		},
 		BuildPresets: []buildPreset{
-			{Name: "debug", ConfigurePreset: "debug"},
-			{Name: "release", ConfigurePreset: "release"},
+			{Name: "debug", ConfigurePreset: "debug", Configuration: m.CMake.BuildTypeFor("debug")},
+			{Name: "release", ConfigurePreset: "release", Configuration: m.CMake.BuildTypeFor("release")},
 		},
 	}
 	b, err := json.MarshalIndent(pf, "", "  ")
