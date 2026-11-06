@@ -9,6 +9,9 @@ Implementation: **Go 1.27+** · Generates: **CMake 3.24+** · Backend: **Ninja**
 
 ## 1. What cppm is
 
+cppm is short for **C++ maker** — not "package manager". It maintains no registry and resolves
+nothing from an index; dependencies are git URLs. What it makes is the project and the CMake.
+
 **A project scaffolder, a dependency pinner, and a wrapper over CMake presets and the build.**
 
 It is not a CMake replacement and does not claim to generate complete or final CMake. The goal is to

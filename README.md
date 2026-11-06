@@ -1,6 +1,6 @@
 # cppm
 
-Start a C++ project, add a dependency, build it — without writing CMake.
+**C++ maker.** Start a C++ project, add a dependency, build it — without writing CMake.
 
 ```bash
 cppm init MyApp
