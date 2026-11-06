@@ -258,6 +258,12 @@ cppm cannot discover is the most useful small contribution.
 
 [MIT](LICENSE) © Mehdi Shokohifar
 
+## Roadmap
+
+[docs/ROADMAP.md](docs/ROADMAP.md). Next up is v0.2 — `cppm test` wrapping CTest, dev-only
+dependencies so test frameworks stay out of release builds, sanitizer presets (ASan, UBSan, TSan)
+and valgrind/helgrind through CTest's memcheck.
+
 ## Design notes
 
 [docs/architecture.md](docs/architecture.md) — how cppm is built and why: file ownership, the
