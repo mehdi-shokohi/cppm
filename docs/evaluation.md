@@ -7,15 +7,39 @@ Environment verified: CMake 3.28.3 · Ninja 1.13.2 · Git 2.43.0 · GCC 13.3 · 
 
 ---
 
+## 0. Scope boundary
+
+This governs everything below, so it is stated first.
+
+**cppm is a project scaffolder, a dependency pinner, and a wrapper over CMake presets and the
+build. It is not a CMake replacement and does not claim to generate complete or final CMake.**
+
+The goal is to let a developer *start* and run a C++/CMake project without knowing CMake syntax.
+In some scenarios the user will open `CMakeLists.txt` and edit it by hand, and that is an expected,
+supported outcome — not a failure of the tool.
+
+One consequence for the proposal text: §1's "Developers should manage dependencies, not write
+dependency-related CMake code" is stronger than what cppm should promise. The accurate version is
+*"developers should not need to write dependency CMake to get started."* Worth softening in
+[proposal.md](../proposal.md) so the README does not over-claim.
+
+---
+
 ## 1. Verdict
 
-The proposal is **sound and worth building**, with one serious caveat: the feature it treats as a
-solved subroutine — *automatic CMake target detection* — is the hardest part of the project and is
-not statically solvable in the general case. Everything else (manifest, lockfile, FetchContent
-generation, build wrapping) is straightforward engineering by comparison.
+The proposal is **sound and worth building.** Under the scope in §0 it is also materially less risky
+than the original framing implied.
 
-Recommendation: **proceed**, but reorder the plan to de-risk target discovery first, and adopt the
-three findings in §3 before writing production code.
+The feature the proposal treats as a solved subroutine — *automatic CMake target detection* — is the
+hardest part of the project and is **not statically solvable in the general case** (§2.1). Under a
+"never write CMake" promise that would be an existential problem. Under §0 it is not: a missed
+target becomes a clear error message telling the user which line to edit, which is an acceptable and
+documentable outcome. Everything else (manifest, lockfile, FetchContent generation, preset wrapping)
+is straightforward engineering by comparison.
+
+Recommendation: **proceed.** Adopt the findings in §3, keep the user/generated file boundary
+absolute, and treat target inference as a *convenience with a good failure path* rather than a
+correctness guarantee.
 
 I ran four empirical spikes against real repositories to test the riskiest assumptions. Results are
 in §2 and they change the architecture materially.
@@ -93,6 +117,78 @@ The consequence is important for scoping: generic, automatic transitive deduplic
 achievable. It is a curated-knowledge problem. This makes the recipe database (§3.1) load-bearing
 rather than optional polish, and it means the proposal's "support transitive dependencies where
 possible" should be stated honestly as a limitation rather than an objective.
+
+---
+
+### 2.5 Phase 0 measurement: inference resolves 8 of 10 real libraries
+
+Built a harness ([tools/phase0](../tools/phase0/main.go)) that clones ten real libraries and runs
+the scan-and-rank pipeline with **no curated data at all**. Final result:
+
+```
+LIBRARY        RESULT TOP PICK                           EXPECTED
+fmt            HIT    fmt::fmt                           fmt::fmt
+spdlog         HIT    spdlog::spdlog                     spdlog::spdlog
+json           HIT    nlohmann_json::nlohmann_json       nlohmann_json::nlohmann_json
+Catch2         HIT    Catch2::Catch2                     Catch2::Catch2WithMain | Catch2::Catch2
+googletest     ASK    (no confident answer)              GTest::gtest_main | GTest::gtest
+eigen          HIT    Eigen3::Eigen                      Eigen3::Eigen
+abseil         ASK    (no confident answer)              absl::base | absl::strings
+SDL2           HIT    SDL2::SDL2                         SDL2::SDL2
+cxxopts        HIT    cxxopts::cxxopts                   cxxopts::cxxopts
+tomlplusplus   HIT    tomlplusplus::tomlplusplus         tomlplusplus::tomlplusplus
+
+HIT   (top-1 correct)      : 8/10   80%
+ASK   (declined to guess)  : 2
+WRONG (confident + wrong)  : 0      <-- the number that must stay 0
+```
+
+**80% automatic, 20% honest refusal, zero confident errors.** Under the §0 scope that is a good
+result: the two refusals cost the user one line of JSON, which is exactly the hand-off §0 permits.
+
+Two iterations produced that number, and both lessons are worth keeping:
+
+**Iteration 1 — 60%, one confidently wrong answer.** Three libraries yielded *zero* candidates. The
+cause was not the ranking heuristic (which was correct in 6 of 6 cases where candidates existed) but
+candidate *extraction*: target names assembled from CMake variables.
+
+```cmake
+# nlohmann/json — both names are variables
+add_library(${NLOHMANN_JSON_TARGET_NAME} INTERFACE)
+add_library(${PROJECT_NAME}::${NLOHMANN_JSON_TARGET_NAME} ALIAS ${NLOHMANN_JSON_TARGET_NAME})
+```
+
+Resolving `project()` and single-valued `set()` definitions fixes this class completely:
+`project(nlohmann_json)` plus `set(NLOHMANN_JSON_TARGET_NAME ${PROJECT_NAME})` yields exactly
+`nlohmann_json::nlohmann_json`. That change alone took the result from 60% to 80%.
+
+**Iteration 2 — eliminating the confident error.** abseil ranked `absl::abseil_test_dll` first and
+reported it with confidence. A soft scoring penalty was not enough, so markers like `test`, `bench`,
+`mock`, `example` and `dll` became a **hard veto**: a candidate carrying one is disqualified, not
+merely demoted, and if nothing survives the tool answers ASK. The marker is ignored when it also
+appears in the package's own name, so a library legitimately called *googletest* is not vetoed by
+its own name.
+
+**The residual 20% is a hard limit, not a tuning problem.** Both refusals have the same cause —
+targets created by helper macros rather than literal `add_library` calls:
+
+```cmake
+# googletest/cmake/internal_utils.cmake — name and namespace are function parameters
+add_library(${cmake_package_name}::${name} ALIAS ${name})
+cxx_library(gtest "${cxx_strict}" src/gtest-all.cc)   # custom macro, not add_library
+```
+
+Resolving these would require interpreting CMake rather than scanning it. This is precisely the
+territory the curated recipe DB exists to cover, and it validates that decision with evidence: ~20–30
+recipes turn the two refusals into hits and cover the long tail of helper-macro-based projects.
+
+**Design rule extracted:** *prefer ASK over a confident guess.* An inference tool that declines
+gracefully and names the one line to edit fits §0; one that silently links the wrong target does
+not. `WRONG` is the metric to protect in CI, not `HIT`.
+
+**Incidental infrastructure note.** GitLab returned HTTP 403 on the first run and cloned normally on
+the second — transient rate-limiting, not host incompatibility. Non-GitHub hosts work; network
+failures need retry with backoff, as the proposal's §10 already requires.
 
 ---
 
@@ -219,11 +315,17 @@ Worth knowing precisely, because it determines where effort should go.
   no lockfile and no dependency CLI.
 - **Hunter**, **build2**, **xmake** — different models, smaller reach.
 
-cppm's defensible gap is the **combination** of a CLI-driven manifest, a true commit-pinned
-lockfile, and automatic target wiring. No existing tool does all three. But note the implication:
-because CPM.cmake already covers caching plus FetchContent convenience, cppm must win specifically
-on *never hand-writing CMake* and on *reproducibility*. Those two should receive the engineering
-effort; caching is table stakes.
+cppm's defensible gap is the **combination** of project scaffolding, a CLI-driven manifest, a true
+commit-pinned lockfile, and a preset/build wrapper. No existing tool does all four.
+
+Given §0, the claim to compete on is **time-to-first-successful-build for someone who does not know
+CMake** — `cppm init` → `cppm add` → `cppm build` with no CMake authoring required to get going.
+That is a different axis from CPM.cmake, which assumes you are already writing CMake and makes
+dependencies less painful within it. It is adjacent to cmkr, which generates CMakeLists from TOML
+but has no lockfile, no dependency CLI and no build wrapper.
+
+Caching is table stakes; CPM.cmake already has it. The engineering effort should go to scaffolding
+quality, reproducibility, and the quality of the failure path when inference declines (§2.5).
 
 ---
 
@@ -232,14 +334,10 @@ effort; caching is table stakes.
 The proposal's Phase 1→5 ordering builds the easy, low-risk parts first and defers the single
 feature that determines whether the product works at all. Invert that.
 
-**Phase 0 — Discovery measurement (new, do this first).**
-Before committing to the architecture, measure what fraction of real libraries can be resolved
-automatically by the §2.2 method. Suggested sample: fmt, spdlog, nlohmann/json, Catch2, googletest,
-Eigen, abseil, SDL2, cxxopts, tomlplusplus.
-
-This number decides the product. Above ~80%, inference-first with recipes as fallback is viable.
-Below ~70%, the value proposition shifts to the curated recipe database and scope changes
-significantly. It is cheap to measure and expensive to guess wrong about.
+**Phase 0 — Discovery measurement. DONE.** Result in §2.5: 80% automatic, 0 confident errors. The
+exit criterion was "above ~80% means inference-first with recipes as fallback is viable" — met. The
+architecture is therefore **inference-first with a small curated recipe DB**, as built in
+[architecture.md](architecture.md) §4, and not recipe-first.
 
 Phases 1–5 then follow roughly as proposed, with `init` and the manifest coming along nearly free,
 and CMake generation pulled forward to sit beside `add`.
@@ -248,10 +346,19 @@ See [architecture.md](architecture.md) for the revised schemas, package layout a
 
 ---
 
-## 7. Open items requiring a decision
+## 7. Decisions taken
 
-1. **Go module path** — needed for `go.mod`; blocks the first commit.
-2. **Recipe database in the MVP, or inference only?** Materially changes scope. §2.4 argues it is
-   not optional, but it is a real cost.
-3. **CMake floor: 3.24+** to permit dependency providers (§3.3). Recommended.
-4. **Repository is not yet a Git repo** — `git init` is pending.
+1. **Implementation language: Go** (§4). Replaces the proposal's C++20.
+2. **Scope: scaffolder + pinner + preset wrapper**, not a CMake replacement (§0).
+3. **Architecture: inference-first, with a small embedded recipe DB** of ~20–30 libraries.
+   Justified by the Phase 0 measurement (§2.5) rather than by assumption.
+4. **CMake floor raised to 3.24** to permit dependency providers (§3.3).
+5. **Module path `cppm`** as a placeholder; renaming later is a one-line change plus a find-replace.
+6. **Repository initialised**, docs and the Phase 0 harness committed.
+
+### Still open
+
+1. **Recipe DB contents** — which ~20–30 libraries ship in the embedded set. googletest and abseil
+   are required by §2.5; the rest should follow observed demand.
+2. **`proposal.md` §1 wording** over-claims relative to §0 and should be softened.
+3. **Windows/macOS verification** — all measurements here are Linux. MSVC in particular will differ.

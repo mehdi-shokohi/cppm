@@ -7,12 +7,29 @@ Implementation language: **Go 1.27+** · Generated build system: **CMake 3.24+**
 
 ---
 
+## 0. What cppm is
+
+**A project scaffolder, a dependency pinner, and a wrapper over CMake presets and the build.**
+
+It is *not* a CMake replacement and does not claim to generate complete or final CMake. The goal is
+to get a developer from nothing to a building C++ project without knowing CMake syntax. Editing
+`CMakeLists.txt` by hand afterwards is an expected and supported outcome.
+
+This boundary is what makes the design tractable: target inference can be an 80%-accurate
+convenience with a clear failure path (see
+[evaluation.md](evaluation.md) §2.5) rather than a correctness guarantee it could not meet.
+
+---
+
 ## 1. Design rules
 
 1. **cppm never owns the build.** It generates CMake and shells out. CMake and Ninja do the work.
 2. **Generated and hand-written files never mix.** Everything cppm writes lives under
    `.cppm/generated/` and carries a "do not edit" banner. `CMakeLists.txt` is the user's file after
    `init` and is never rewritten.
+2b. **Prefer ASK over a confident guess.** When inference is not confident, say so and name the
+   exact line to edit. A wrong link target that configures successfully is the worst outcome the
+   tool can produce; "I don't know, add this one line" is an acceptable one.
 3. **The lockfile is the source of truth for builds.** The manifest states intent; the lock states
    what will actually be fetched. `sync` honours the lock; only `update` moves it.
 4. **Every write is atomic.** Temp file in the same directory, then rename.
@@ -127,26 +144,47 @@ The core mechanism. Three tiers, first hit wins.
 └─ Tier 3  INFERRED ── static source scan + probe ──────── the long tail
 ```
 
-**Tier 3 pipeline**
+**Tier 3 pipeline** — measured at **80% correct, 0 confident errors** across ten real libraries
+([evaluation.md](evaluation.md) §2.5). Prototype: [tools/phase0](../tools/phase0/main.go).
 
 1. **Clone** into the global mirror cache at the locked commit.
-2. **Scan** `CMakeLists.txt` and `*.cmake` for
-   `add_library(<name> ALIAS <real>)` and `add_library(<name> INTERFACE|STATIC|SHARED|OBJECT)`.
-   Validated against fmt and spdlog — recovers the namespaced names CMake itself cannot enumerate
-   ([evaluation.md](evaluation.md) §2.2).
-3. **Rank** candidates:
-   - prefer namespaced (`ns::name`) over bare;
-   - prefer a name case-insensitively matching the package name;
-   - penalise `-header-only`, `_header_only`, `-static`, `-shared`, `_test`, `_benchmark`;
-   - prefer `ALIAS` targets over their underlying real targets.
-4. **Probe** the winner at configure time with `if(TARGET x)` and record the result. Probing is
-   reliable — verified with no false positives across seven candidates.
-5. **Persist** the outcome to the lock as `target_origin: inferred`, and warn once so the user knows
-   a guess was made and can pin it explicitly.
+2. **Resolve variables.** Collect the top-level `project()` name and single-valued `set()`
+   definitions, shallowest file first, then expand `${VAR}` with a bounded number of passes.
+   *Not optional* — target names are routinely assembled from variables, and adding this step alone
+   moved the measurement from 60% to 80%.
+3. **Scan** `CMakeLists.txt` and `*.cmake` for `add_library(<name> ALIAS <real>)` and
+   `add_library(<name> INTERFACE|STATIC|SHARED|MODULE|OBJECT)`, skipping `test/`, `example/`,
+   `benchmark/`, `third_party/`, `extern/`, `vendor/` and `doc/` subtrees. This recovers the
+   namespaced names CMake itself cannot enumerate (§2.1). Names still containing `$` after
+   expansion are discarded as unusable.
+4. **Veto.** Disqualify outright — not merely demote — any candidate whose bare name contains
+   `test`, `bench`, `mock`, `example`, `sample`, `fuzz`, `dll` or `buildall`. The marker is ignored
+   when it also appears in the package's own name, so *googletest* is not vetoed by its own name.
+   This exists because a soft penalty was insufficient: abseil ranked `absl::abseil_test_dll` first
+   and recommended it with confidence.
+5. **Rank** the survivors: `+50` namespaced, `+20` alias, `+40`/`+20` bare name matching the package,
+   `+25` namespace matching the package, `+15` for the canonical `ns::ns` form, `+5` interface,
+   `-30` for `header_only`/`static`/`shared`/`main`, minus a small length penalty. Package identity
+   is matched against **both** the dependency name and the dependency's own `project()` name, which
+   is what makes `nlohmann_json::nlohmann_json` reachable from a dependency called `json`.
+6. **Gate on confidence.** Answer only if the top candidate survived the veto *and* is plausibly
+   related to the package. Otherwise report ASK — no guess. Protect `WRONG == 0` in CI; it matters
+   more than the hit rate.
+7. **Probe** the winner at configure time with `if(TARGET x)`. Reliable — verified with no false
+   positives across seven candidate names.
+8. **Persist** to the lock as `target_origin: inferred` and warn once, so the user knows a guess was
+   made and can pin it.
 
-Ranking is where this is fragile. `fmt::fmt` vs `fmt::fmt-header-only` is decided by heuristic, and
-the heuristic will sometimes be wrong — hence Tier 1 must be easy to reach and the warning must be
-visible. Phase 0 measures how often Tier 3 succeeds.
+**Known hard limit.** The residual 20% is not a tuning problem. Both failures in the measurement
+(googletest, abseil) declare targets through helper macros rather than literal `add_library` calls:
+
+```cmake
+add_library(${cmake_package_name}::${name} ALIAS ${name})  # parameters, not variables
+cxx_library(gtest "${cxx_strict}" src/gtest-all.cc)        # custom macro
+```
+
+Resolving these needs a CMake interpreter, not a scanner. They are Tier 2's job, which is the
+evidence-based justification for shipping the recipe DB.
 
 **Recipe entry format** (embedded, also user-extensible via `~/.config/cppm/recipes/`):
 
@@ -197,8 +235,10 @@ foreach(_dep IN LISTS CPPM_DEPENDENCIES)
     if(NOT TARGET ${_t})
       message(FATAL_ERROR
         "cppm: dependency '${_dep}' does not provide target '${_t}'.\n"
-        "Set the correct name in cppm.json:\n"
-        "  \"${_dep}\": { ..., \"targets\": [\"<real::target>\"] }")
+        "cppm could not determine the right target name. Either pin it in cppm.json:\n"
+        "    \"${_dep}\": { ..., \"targets\": [\"<real::target>\"] }\n"
+        "or link it yourself in CMakeLists.txt — cppm will not overwrite your edits.\n"
+        "Run 'cppm info ${_dep}' to see the candidates that were considered.")
     endif()
   endforeach()
 endforeach()
@@ -324,11 +364,11 @@ destroys reproducibility, so it should be an explicit test.
 
 ## 9. Revised roadmap
 
-**Phase 0 — Discovery measurement.** A throwaway Go program that clones ~10 real libraries, runs the
-§4 scan-and-rank pipeline, and reports how many produce the correct target without a recipe. Sample:
-fmt, spdlog, nlohmann/json, Catch2, googletest, Eigen, abseil, SDL2, cxxopts, tomlplusplus.
-*Exit criterion: a number. It determines whether the product is inference-first or recipe-first, and
-it is far cheaper to measure than to guess.*
+**Phase 0 — Discovery measurement. ✅ DONE.** [tools/phase0](../tools/phase0/main.go) clones ten real
+libraries and reports inference accuracy with no recipes: **8 HIT, 2 ASK, 0 WRONG**. Exit criterion
+(>80% ⇒ inference-first) met, so the architecture is inference-first with a small recipe DB. The
+scan/veto/rank/gate logic is promoted to `internal/discover` in Phase 3, and the harness becomes its
+regression test — its corpus is the natural fixture set.
 
 **Phase 1 — Skeleton that builds something.** `go.mod`, cobra root, manifest + lock read/write with
 atomic writes and deterministic ordering, `init`, and a generated `CMakeLists.txt` that configures
@@ -357,10 +397,15 @@ Phases 1–2 are mostly mechanical. Phase 3 carries nearly all the risk, which i
 
 Being explicit in the README about these is better than implying capability:
 
+0. **cppm does not replace CMake and does not generate complete CMake.** It gets a project started
+   and building without CMake expertise. Non-trivial projects will eventually edit
+   `CMakeLists.txt` directly, and cppm is designed to stay out of the way when they do — it never
+   rewrites that file after `init`.
 1. **No version solving.** cppm pins; it does not solve. Conflicts are reported, not resolved.
 2. **Transitive deduplication is best-effort** and depends on recipe knowledge —
    [evaluation.md](evaluation.md) §2.4.
 3. **Non-CMake libraries need a recipe or a manual wrapper.** Autotools and Makefile projects are
    out of scope for the MVP.
-4. **Inferred target names can be wrong.** Hence the visible warning and the one-line override.
+4. **Inferred target names are ~80% accurate.** When inference is not confident it declines and
+   tells you the one line to add, rather than guessing — [evaluation.md](evaluation.md) §2.5.
 5. **Shallow fetch depends on server support,** with automatic fallback — §2.3.

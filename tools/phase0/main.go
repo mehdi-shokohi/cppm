@@ -2,10 +2,11 @@
 // for a real library using only a static source scan, with no curated recipe.
 //
 // Rationale: CMake cannot enumerate ALIAS targets, which are exactly the names users
-// are supposed to link (fmt::fmt, spdlog::spdlog). They can however be recovered by
-// scanning the source. This harness measures how reliable that recovery is.
+// are supposed to link (fmt::fmt, spdlog::spdlog). BUILDSYSTEM_TARGETS returns only
+// the raw underlying targets, so "inspect the dependency and read its targets" does
+// not work. Namespaced names are however recoverable by scanning the source.
 //
-// The scan/rank logic here is the prototype of internal/discover.
+// The scan/rank/confidence logic here is the prototype of internal/discover.
 //
 //	go run ./tools/phase0
 //	go run ./tools/phase0 -keep   # reuse existing clones
@@ -39,15 +40,15 @@ var corpus = []library{
 	{"spdlog", "https://github.com/gabime/spdlog.git", "v1.15.3",
 		[]string{"spdlog::spdlog"}, ""},
 	{"json", "https://github.com/nlohmann/json.git", "v3.11.3",
-		[]string{"nlohmann_json::nlohmann_json"}, "target name unrelated to repo name"},
+		[]string{"nlohmann_json::nlohmann_json"}, "target name built from variables"},
 	{"Catch2", "https://github.com/catchorg/Catch2.git", "v3.7.1",
 		[]string{"Catch2::Catch2WithMain", "Catch2::Catch2"}, "two legitimate answers"},
 	{"googletest", "https://github.com/google/googletest.git", "v1.15.2",
-		[]string{"GTest::gtest_main", "GTest::gtest"}, "multi-target"},
+		[]string{"GTest::gtest_main", "GTest::gtest"}, "targets made by helper macros"},
 	{"eigen", "https://gitlab.com/libeigen/eigen.git", "3.4.0",
-		[]string{"Eigen3::Eigen"}, "non-GitHub host, header-only"},
+		[]string{"Eigen3::Eigen"}, "non-GitHub host"},
 	{"abseil", "https://github.com/abseil/abseil-cpp.git", "20240722.0",
-		[]string{"absl::base", "absl::strings"}, "hundreds of targets, no single entry point"},
+		[]string{"absl::base", "absl::strings"}, "helper functions, no single entry point"},
 	{"SDL2", "https://github.com/libsdl-org/SDL.git", "release-2.30.9",
 		[]string{"SDL2::SDL2"}, "release-* tag form"},
 	{"cxxopts", "https://github.com/jarro2783/cxxopts.git", "v3.2.0",
@@ -59,9 +60,11 @@ var corpus = []library{
 // ---------------------------------------------------------------- source scan
 
 var (
-	reAlias = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.$\{\}-]+)\s+ALIAS\s+([A-Za-z0-9_.$\{\}-]+)\s*\)`)
-	reReal  = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.$\{\}-]+)\s+(INTERFACE|STATIC|SHARED|MODULE|OBJECT)\b`)
+	reAlias = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.${}-]+)\s+ALIAS\s+([A-Za-z0-9_.${}-]+)\s*\)`)
+	reReal  = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.${}-]+)\s+(INTERFACE|STATIC|SHARED|MODULE|OBJECT)\b`)
 	reProj  = regexp.MustCompile(`(?is)\bproject\s*\(\s*([A-Za-z0-9_.-]+)`)
+	reSet   = regexp.MustCompile(`(?is)\bset\s*\(\s*([A-Za-z0-9_]+)\s+([^)]*)\)`)
+	reVar   = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
 )
 
 // skipDir filters out directories whose targets are never the public API.
@@ -70,7 +73,7 @@ func skipDir(rel string) bool {
 	for _, bad := range []string{
 		"test/", "tests/", "example/", "examples/", "benchmark/", "benchmarks/",
 		"third_party/", "thirdparty/", "extern/", "external/", "vendor/",
-		"doc/", "docs/", "fuzz/", "fuzzing/", "sample/", "samples/", "tools/",
+		"doc/", "docs/", "fuzz/", "fuzzing/", "sample/", "samples/",
 	} {
 		if strings.HasPrefix(p, bad) || strings.Contains(p, "/"+bad) {
 			return true
@@ -82,15 +85,30 @@ func skipDir(rel string) bool {
 type candidate struct {
 	Name    string
 	IsAlias bool
-	Kind    string // INTERFACE, STATIC, ... or "ALIAS"
+	Kind    string
 	Score   int
 	Why     []string
 }
 
+type cmakeFile struct{ rel, text string }
+
+// expand substitutes ${VAR} references using a bounded number of passes.
+func expand(s string, vars map[string]string) string {
+	for i := 0; i < 6 && strings.Contains(s, "${"); i++ {
+		s = reVar.ReplaceAllStringFunc(s, func(m string) string {
+			if v, ok := vars[m[2:len(m)-1]]; ok && v != "" {
+				return v
+			}
+			return m
+		})
+	}
+	return s
+}
+
 // scan walks a cloned source tree and extracts every declared library target name.
+// Pass 1 collects project() and set() variables; pass 2 extracts and resolves targets.
 func scan(root string) ([]candidate, string, error) {
-	var projectName string
-	seen := map[string]*candidate{}
+	var files []cmakeFile
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -114,44 +132,73 @@ func scan(root string) ([]candidate, string, error) {
 		if err != nil || len(b) > 4<<20 {
 			return nil
 		}
-		text := string(b)
-
-		// Capture the top-level project() name so ${PROJECT_NAME} can be resolved.
-		if rel == "CMakeLists.txt" {
-			if m := reProj.FindStringSubmatch(text); m != nil {
-				projectName = m[1]
-			}
-		}
-
-		add := func(name, kind string, isAlias bool) {
-			name = strings.TrimSpace(name)
-			if projectName != "" {
-				name = strings.ReplaceAll(name, "${PROJECT_NAME}", projectName)
-				name = strings.ReplaceAll(name, "${PROJECT_NAME_LOWER}", strings.ToLower(projectName))
-			}
-			// Unresolvable variable reference — cannot be used as a link name.
-			if strings.Contains(name, "$") || name == "" {
-				return
-			}
-			if c, ok := seen[name]; ok {
-				if isAlias {
-					c.IsAlias, c.Kind = true, "ALIAS"
-				}
-				return
-			}
-			seen[name] = &candidate{Name: name, IsAlias: isAlias, Kind: kind}
-		}
-
-		for _, m := range reAlias.FindAllStringSubmatch(text, -1) {
-			add(m[1], "ALIAS", true)
-		}
-		for _, m := range reReal.FindAllStringSubmatch(text, -1) {
-			add(m[1], strings.ToUpper(m[2]), false)
-		}
+		files = append(files, cmakeFile{filepath.ToSlash(rel), string(b)})
 		return nil
 	})
 	if err != nil {
-		return nil, projectName, err
+		return nil, "", err
+	}
+
+	// ---- pass 1: variables, top-level CMakeLists.txt first ----
+	sort.SliceStable(files, func(i, j int) bool {
+		return depth(files[i].rel) < depth(files[j].rel)
+	})
+
+	var projectName string
+	for _, f := range files {
+		if f.rel == "CMakeLists.txt" {
+			if m := reProj.FindStringSubmatch(f.text); m != nil {
+				projectName = m[1]
+			}
+		}
+	}
+	vars := map[string]string{
+		"PROJECT_NAME":       projectName,
+		"CMAKE_PROJECT_NAME": projectName,
+	}
+	for _, f := range files {
+		for _, m := range reSet.FindAllStringSubmatch(f.text, -1) {
+			name := m[1]
+			fs := strings.Fields(strings.TrimSpace(m[2]))
+			if len(fs) == 0 {
+				continue
+			}
+			v := strings.Trim(fs[0], `"'`)
+			if v == "" || strings.EqualFold(v, "CACHE") {
+				continue
+			}
+			if _, exists := vars[name]; !exists { // shallowest definition wins
+				vars[name] = v
+			}
+		}
+	}
+	for k, v := range vars {
+		vars[k] = expand(v, vars)
+	}
+
+	// ---- pass 2: targets ----
+	seen := map[string]*candidate{}
+	add := func(name, kind string, isAlias bool) {
+		name = expand(strings.TrimSpace(name), vars)
+		// Still unresolved: cannot be used as a link name.
+		if name == "" || strings.Contains(name, "$") {
+			return
+		}
+		if c, ok := seen[name]; ok {
+			if isAlias {
+				c.IsAlias, c.Kind = true, "ALIAS"
+			}
+			return
+		}
+		seen[name] = &candidate{Name: name, IsAlias: isAlias, Kind: kind}
+	}
+	for _, f := range files {
+		for _, m := range reAlias.FindAllStringSubmatch(f.text, -1) {
+			add(m[1], "ALIAS", true)
+		}
+		for _, m := range reReal.FindAllStringSubmatch(f.text, -1) {
+			add(m[1], strings.ToUpper(m[2]), false)
+		}
 	}
 
 	out := make([]candidate, 0, len(seen))
@@ -161,51 +208,129 @@ func scan(root string) ([]candidate, string, error) {
 	return out, projectName, nil
 }
 
+func depth(rel string) int { return strings.Count(rel, "/") }
+
 // ---------------------------------------------------------------- ranking
 
+// veto markers are never the public entry point of a library. A candidate carrying
+// one is disqualified outright rather than merely demoted, so that the tool answers
+// ASK instead of confidently recommending absl::abseil_test_dll. Exception: if the
+// marker also occurs in the package's own name (googletest, gtest), it carries no
+// signal and is ignored.
+var veto = []string{
+	"test", "benchmark", "bench", "example", "sample", "mock", "fuzz", "dll",
+	"_dummy", "buildall",
+}
+
+// demote markers can legitimately be the answer (Catch2::Catch2WithMain) but are
+// less likely than the plain form, so they are only penalised.
 var demote = []string{
 	"header-only", "header_only", "headeronly",
 	"-static", "_static", "-shared", "_shared",
-	"test", "benchmark", "example", "sample", "mock", "fuzz",
 	"main", "tool", "util", "internal", "experimental",
 }
 
+// vetoed reports whether a candidate is disqualified from being the answer.
+func vetoed(name string, aliases []string) (string, bool) {
+	_, bare := split(strings.ToLower(name))
+	for _, m := range veto {
+		if !strings.Contains(bare, m) {
+			continue
+		}
+		inPkg := false
+		for _, a := range aliases {
+			if strings.Contains(strings.ToLower(a), m) {
+				inPkg = true
+				break
+			}
+		}
+		if !inPkg {
+			return m, true
+		}
+	}
+	return "", false
+}
+
+func split(name string) (ns, bare string) {
+	if i := strings.Index(name, "::"); i >= 0 {
+		return name[:i], name[i+2:]
+	}
+	return "", name
+}
+
+// related reports whether a name plausibly belongs to this package at all.
+// Used as a confidence gate: an unrelated top pick is worse than no answer.
+func related(name string, aliases []string) bool {
+	ns, bare := split(strings.ToLower(name))
+	for _, a := range aliases {
+		a = strings.ToLower(a)
+		if a == "" {
+			continue
+		}
+		for _, part := range []string{ns, bare} {
+			if part == "" {
+				continue
+			}
+			if part == a || strings.HasPrefix(part, a) || strings.HasPrefix(a, part) {
+				return true
+			}
+			if n := commonPrefix(part, a); n >= 4 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commonPrefix(a, b string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
 // rank scores candidates by how likely each is to be THE target a user should link.
-func rank(cands []candidate, pkg string) []candidate {
-	lpkg := strings.ToLower(pkg)
-	// Common repo-name -> target-name drift (SDL repo exports SDL2, etc.)
+func rank(cands []candidate, aliases []string) []candidate {
 	for i := range cands {
 		c := &cands[i]
-		name := c.Name
-		bare := name
-		ns := ""
-		if i := strings.Index(name, "::"); i >= 0 {
-			ns, bare = name[:i], name[i+2:]
-		}
+		ns, bare := split(c.Name)
 		lbare, lns := strings.ToLower(bare), strings.ToLower(ns)
 
-		if strings.Contains(name, "::") {
+		if ns != "" {
 			c.Score += 50
-			c.Why = append(c.Why, "+50 namespaced")
+			c.Why = append(c.Why, "+50 ns")
 		}
 		if c.IsAlias {
 			c.Score += 20
 			c.Why = append(c.Why, "+20 alias")
 		}
-		// Namespace or bare name echoing the package name is a strong signal.
-		switch {
-		case lbare == lpkg:
-			c.Score += 40
-			c.Why = append(c.Why, "+40 bare==pkg")
-		case strings.HasPrefix(lbare, lpkg) || strings.HasPrefix(lpkg, lbare):
-			c.Score += 20
-			c.Why = append(c.Why, "+20 bare~pkg")
+
+		best := 0
+		for _, a := range aliases {
+			la := strings.ToLower(a)
+			if la == "" {
+				continue
+			}
+			switch {
+			case lbare == la && best < 40:
+				best = 40
+			case (strings.HasPrefix(lbare, la) || strings.HasPrefix(la, lbare)) && best < 20:
+				best = 20
+			}
 		}
-		if lns != "" && (lns == lpkg || strings.HasPrefix(lns, lpkg) || strings.HasPrefix(lpkg, lns)) {
-			c.Score += 25
-			c.Why = append(c.Why, "+25 ns~pkg")
+		if best > 0 {
+			c.Score += best
+			c.Why = append(c.Why, fmt.Sprintf("+%d bare~pkg", best))
 		}
-		// ns::ns (fmt::fmt, absl::absl-style canonical form)
+		for _, a := range aliases {
+			la := strings.ToLower(a)
+			if lns != "" && la != "" && (lns == la || strings.HasPrefix(lns, la) || strings.HasPrefix(la, lns)) {
+				c.Score += 25
+				c.Why = append(c.Why, "+25 ns~pkg")
+				break
+			}
+		}
 		if lns != "" && lns == lbare {
 			c.Score += 15
 			c.Why = append(c.Why, "+15 ns==bare")
@@ -217,11 +342,14 @@ func rank(cands []candidate, pkg string) []candidate {
 				break
 			}
 		}
+		if m, bad := vetoed(c.Name, aliases); bad {
+			c.Score -= 1000
+			c.Why = append(c.Why, "VETO:"+m)
+		}
 		if c.Kind == "INTERFACE" {
 			c.Score += 5
-			c.Why = append(c.Why, "+5 interface")
+			c.Why = append(c.Why, "+5 iface")
 		}
-		// Shorter names are usually the public entry point.
 		c.Score -= len(bare) / 8
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
@@ -249,7 +377,6 @@ func clone(lib library, dir string) (string, error) {
 		}
 		return nil
 	}
-	// Try the requested tag shallow; fall back to the default branch.
 	if err := run("clone", "--quiet", "--depth", "1", "--branch", lib.Tag,
 		"--single-branch", "--", lib.URL, dir); err == nil {
 		return "tag " + lib.Tag, nil
@@ -257,7 +384,7 @@ func clone(lib library, dir string) (string, error) {
 	if err := run("clone", "--quiet", "--depth", "1", "--", lib.URL, dir); err != nil {
 		return "", err
 	}
-	return "DEFAULT BRANCH (tag " + lib.Tag + " missing)", nil
+	return "DEFAULT BRANCH (tag missing)", nil
 }
 
 func lastLine(s string) string {
@@ -270,10 +397,12 @@ func lastLine(s string) string {
 type result struct {
 	lib        library
 	ref        string
+	project    string
 	err        error
 	cands      []candidate
 	top1OK     bool
 	top3OK     bool
+	confident  bool
 	totalCands int
 }
 
@@ -282,28 +411,30 @@ func main() {
 	work := flag.String("work", "tools/phase0/_work", "clone directory")
 	flag.Parse()
 
-	if !*keep {
-		_ = os.RemoveAll(*work)
-	}
 	if err := os.MkdirAll(*work, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "mkdir:", err)
 		os.Exit(1)
+	}
+	if !*keep {
+		fmt.Println("(use -keep to reuse clones)")
 	}
 
 	results := make([]result, 0, len(corpus))
 	for _, lib := range corpus {
 		start := time.Now()
-		fmt.Printf("  %-14s cloning... ", lib.Name)
+		fmt.Printf("  %-14s ", lib.Name)
 		dir := filepath.Join(*work, lib.Name)
 		r := result{lib: lib}
+
 		ref, err := clone(lib, dir)
 		if err != nil {
 			r.err = err
-			fmt.Printf("FAILED (%v)\n", err)
+			fmt.Printf("CLONE FAILED: %v\n", err)
 			results = append(results, r)
 			continue
 		}
 		r.ref = ref
+
 		cands, proj, err := scan(dir)
 		if err != nil {
 			r.err = err
@@ -311,8 +442,10 @@ func main() {
 			results = append(results, r)
 			continue
 		}
-		r.totalCands = len(cands)
-		r.cands = rank(cands, lib.Name)
+		r.project, r.totalCands = proj, len(cands)
+
+		aliases := []string{lib.Name, proj}
+		r.cands = rank(cands, aliases)
 
 		exp := map[string]bool{}
 		for _, e := range lib.Expected {
@@ -328,55 +461,81 @@ func main() {
 				}
 			}
 		}
-		verdict := "MISS"
-		if r.top1OK {
-			verdict = "HIT "
-		} else if r.top3OK {
-			verdict = "top3"
+		// Confidence gate: answer only if the top pick plausibly belongs to this
+		// package and is not disqualified. Declining to guess (ASK) is a correct
+		// outcome; a confident wrong answer is not.
+		if len(r.cands) > 0 {
+			_, bad := vetoed(r.cands[0].Name, aliases)
+			r.confident = related(r.cands[0].Name, aliases) && !bad
 		}
-		fmt.Printf("%s  %-4s %3d candidates  (%s, project=%s, %.1fs)\n",
-			ref, verdict, len(cands), lib.Name, proj, time.Since(start).Seconds())
+
+		fmt.Printf("%-28s %-5s %3d cands  project=%-22s %.1fs\n",
+			ref, verdictOf(r), len(cands), proj, time.Since(start).Seconds())
 		results = append(results, r)
 	}
 
-	// -------------------------------------------------- report
-	fmt.Println("\n" + strings.Repeat("=", 78))
-	fmt.Println("PHASE 0 RESULT — static target inference, no recipes")
-	fmt.Println(strings.Repeat("=", 78))
-	fmt.Printf("\n%-14s %-6s %-34s %s\n", "LIBRARY", "RESULT", "TOP PICK", "EXPECTED")
-	fmt.Println(strings.Repeat("-", 78))
+	report(results)
+}
 
-	var hit, top3, fail int
+func verdictOf(r result) string {
+	switch {
+	case r.err != nil:
+		return "ERR"
+	case !r.confident:
+		return "ASK"
+	case r.top1OK:
+		return "HIT"
+	case r.top3OK:
+		return "TOP3"
+	default:
+		return "WRONG"
+	}
+}
+
+func report(results []result) {
+	line := strings.Repeat("=", 86)
+	fmt.Println("\n" + line)
+	fmt.Println("PHASE 0 — static target inference, no recipes")
+	fmt.Println(line)
+	fmt.Printf("\n%-14s %-6s %-34s %s\n", "LIBRARY", "RESULT", "TOP PICK", "EXPECTED")
+	fmt.Println(strings.Repeat("-", 86))
+
+	var hit, top3, wrong, ask, errs int
 	for _, r := range results {
+		v := verdictOf(r)
+		top := "(no confident answer)"
 		if r.err != nil {
-			fail++
-			fmt.Printf("%-14s %-6s %-34s %s\n", r.lib.Name, "ERROR", "-", strings.Join(r.lib.Expected, " | "))
-			continue
-		}
-		top := "(none found)"
-		if len(r.cands) > 0 {
+			top = "-"
+		} else if len(r.cands) > 0 && r.confident {
 			top = r.cands[0].Name
 		}
-		verdict := "MISS"
-		if r.top1OK {
-			verdict = "HIT"
+		switch v {
+		case "HIT":
 			hit++
-		} else if r.top3OK {
-			verdict = "TOP3"
+		case "TOP3":
 			top3++
+		case "WRONG":
+			wrong++
+		case "ASK":
+			ask++
+		case "ERR":
+			errs++
 		}
-		fmt.Printf("%-14s %-6s %-34s %s\n", r.lib.Name, verdict, top, strings.Join(r.lib.Expected, " | "))
+		fmt.Printf("%-14s %-6s %-34s %s\n", r.lib.Name, v, top, strings.Join(r.lib.Expected, " | "))
 	}
 
 	n := len(results)
-	fmt.Println(strings.Repeat("-", 78))
-	fmt.Printf("top-1 correct : %d/%d  (%.0f%%)\n", hit, n, pct(hit, n))
-	fmt.Printf("top-3 correct : %d/%d  (%.0f%%)\n", hit+top3, n, pct(hit+top3, n))
-	fmt.Printf("errors        : %d\n", fail)
+	reachable := n - errs
+	fmt.Println(strings.Repeat("-", 86))
+	fmt.Printf("HIT   (top-1 correct)      : %d/%d   %.0f%% of reachable\n", hit, reachable, pct(hit, reachable))
+	fmt.Printf("TOP3  (correct, not first) : %d\n", top3)
+	fmt.Printf("ASK   (declined to guess)  : %d\n", ask)
+	fmt.Printf("WRONG (confident + wrong)  : %d   <-- the number that must stay 0\n", wrong)
+	fmt.Printf("ERR   (unreachable)        : %d\n", errs)
 
-	fmt.Println("\n" + strings.Repeat("=", 78))
-	fmt.Println("PER-LIBRARY DETAIL (top 4 ranked candidates)")
-	fmt.Println(strings.Repeat("=", 78))
+	fmt.Println("\n" + line)
+	fmt.Println("DETAIL (top 4 ranked candidates, * = expected)")
+	fmt.Println(line)
 	for _, r := range results {
 		if r.err != nil {
 			continue
@@ -386,6 +545,10 @@ func main() {
 			note = "  // " + r.lib.Note
 		}
 		fmt.Printf("\n%s  [%d candidates]%s\n", r.lib.Name, r.totalCands, note)
+		if len(r.cands) == 0 {
+			fmt.Println("    (none extractable — targets are built by helper macros)")
+			continue
+		}
 		for i, c := range r.cands {
 			if i >= 4 {
 				break
@@ -399,7 +562,6 @@ func main() {
 			fmt.Printf("  %s %d. %-36s score=%-5d %s\n", mark, i+1, c.Name, c.Score, strings.Join(c.Why, " "))
 		}
 	}
-	fmt.Println("\n(* marks the expected answer)")
 }
 
 func pct(a, b int) float64 {
