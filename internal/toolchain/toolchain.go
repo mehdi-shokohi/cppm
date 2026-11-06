@@ -67,7 +67,10 @@ func Compiler() Tool {
 			return t
 		}
 	}
-	for _, name := range []string{"c++", "g++", "clang++"} {
+	// Concrete drivers first. "c++" is usually a symlink to one of these, and
+	// writing the real name into cppm.json tells the reader which compiler they
+	// are actually getting; "c++" hides it.
+	for _, name := range []string{"g++", "clang++", "c++"} {
 		if t := Find(name); t.Found() {
 			return t
 		}

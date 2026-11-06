@@ -49,8 +49,44 @@ type CXX struct {
 }
 
 // CMake holds CMake-level settings for the generated project.
+//
+// Every field is written out explicitly by `cppm init`, even at its default, so
+// that the file shows what can be changed. A setting nobody can see is a
+// setting nobody can use.
 type CMake struct {
 	Minimum string `json:"minimum"`
+
+	// ExportCompileCommands produces compile_commands.json, which clangd,
+	// ccls and most editors need for completion and diagnostics.
+	//
+	// A pointer so that an absent field means "default" rather than "false".
+	ExportCompileCommands *bool `json:"exportCompileCommands,omitempty"`
+
+	// BuildTypes maps cppm's preset names to CMake build types. Release
+	// defaults to RelWithDebInfo because a release build with no symbols is
+	// very hard to debug in the field; set it to "Release" for a smaller build.
+	BuildTypes map[string]string `json:"buildTypes,omitempty"`
+}
+
+// DefaultBuildTypes are the preset-to-CMake-build-type mappings.
+func DefaultBuildTypes() map[string]string {
+	return map[string]string{"debug": "Debug", "release": "RelWithDebInfo"}
+}
+
+// WantCompileCommands reports whether to export compile_commands.json.
+func (c CMake) WantCompileCommands() bool {
+	if c.ExportCompileCommands == nil {
+		return true
+	}
+	return *c.ExportCompileCommands
+}
+
+// BuildTypeFor returns the CMake build type for a preset name.
+func (c CMake) BuildTypeFor(preset string) string {
+	if t, ok := c.BuildTypes[preset]; ok && t != "" {
+		return t
+	}
+	return DefaultBuildTypes()[preset]
 }
 
 // Toolchain selects the compiler and generator.
@@ -95,6 +131,27 @@ func NormalizeCXX(name string) (string, bool) {
 		return dir + fixed, true
 	}
 	return name, false
+}
+
+// CompanionC returns the C compiler matching a C++ driver.
+//
+// Dependencies routinely contain C sources (zlib, glfw, SDL), and letting one
+// vendor's C++ compiler pair with another's C compiler is a needless source of
+// trouble. Generated projects enable the C language so this is actually used.
+func CompanionC(cxx string) string {
+	base, dir := cxx, ""
+	if i := strings.LastIndexAny(cxx, `/\`); i >= 0 {
+		dir, base = cxx[:i+1], cxx[i+1:]
+	}
+	switch strings.ToLower(base) {
+	case "clang++":
+		return dir + "clang"
+	case "g++":
+		return dir + "gcc"
+	case "c++":
+		return dir + "cc"
+	}
+	return ""
 }
 
 // Target is a build target cppm scaffolds. v1 generates exactly one.
@@ -156,7 +213,11 @@ func New(name string, std int) *Manifest {
 			Required:   true,
 			Extensions: false,
 		},
-		CMake: CMake{Minimum: DefaultCMakeMinimum},
+		CMake: CMake{
+			Minimum:               DefaultCMakeMinimum,
+			ExportCompileCommands: boolPtr(true),
+			BuildTypes:            DefaultBuildTypes(),
+		},
 		Targets: map[string]Target{
 			name: {
 				Kind:    KindExecutable,
@@ -227,6 +288,17 @@ func (m *Manifest) Validate() error {
 	}
 	if m.CMake.Minimum == "" {
 		return errors.New("cmake.minimum must not be empty")
+	}
+	validTypes := map[string]bool{
+		"Debug": true, "Release": true, "RelWithDebInfo": true, "MinSizeRel": true, "": true,
+	}
+	for preset, bt := range m.CMake.BuildTypes {
+		if preset != "debug" && preset != "release" {
+			return fmt.Errorf("cmake.buildTypes: unknown preset %q (expected \"debug\" or \"release\")", preset)
+		}
+		if !validTypes[bt] {
+			return fmt.Errorf("cmake.buildTypes.%s: %q is not a CMake build type (expected Debug, Release, RelWithDebInfo or MinSizeRel)", preset, bt)
+		}
 	}
 	for field, v := range map[string]string{
 		"toolchain.cxx":       m.Toolchain.CXX,
@@ -308,6 +380,9 @@ func (m *Manifest) TargetNames() []string {
 	sort.Strings(names)
 	return names
 }
+
+// boolPtr is a helper for optional boolean fields.
+func boolPtr(v bool) *bool { return &v }
 
 func validStandard(s int) bool {
 	for _, v := range ValidStandards {

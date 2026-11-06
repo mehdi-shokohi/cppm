@@ -41,6 +41,9 @@ func register(c *Command) { commands = append(commands, c) }
 
 func init() {
 	register(cmdInit())
+	register(cmdAdd())
+	register(cmdRemove())
+	register(cmdUpdate())
 	register(cmdSync())
 	register(cmdBuild())
 	register(cmdList())

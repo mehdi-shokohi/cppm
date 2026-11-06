@@ -520,3 +520,75 @@ func compileFlags(t *testing.T, proj string) string {
 	}
 	return string(b)
 }
+
+// Defaults are written explicitly so the user can see and edit them. An unset
+// field teaches nobody anything.
+func TestInitWritesExplicitDefaults(t *testing.T) {
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "A")
+	m := readFile(t, filepath.Join(dir, "A", "cppm.json"))
+	for _, want := range []string{
+		`"cxx"`, `"standard": 20`, `"extensions": false`,
+		`"minimum"`, `"exportCompileCommands": true`, `"buildTypes"`,
+		`"toolchain"`, `"generator"`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("cppm.json does not spell out %s:\n%s", want, m)
+		}
+	}
+	// A concrete compiler, not the "c++" symlink, so the reader knows which
+	// compiler they are getting.
+	if !strings.Contains(m, `"cxx": "g++"`) && !strings.Contains(m, `"cxx": "clang++"`) {
+		t.Errorf("expected a concrete compiler name in the manifest:\n%s", m)
+	}
+}
+
+func TestBuildTypeIsConfigurable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs cmake")
+	}
+	requireTool(t, "cmake")
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "A")
+	proj := filepath.Join(dir, "A")
+
+	mPath := filepath.Join(proj, "cppm.json")
+	edited := strings.Replace(readFile(t, mPath), `"release": "RelWithDebInfo"`, `"release": "Release"`, 1)
+	if err := os.WriteFile(mPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, proj, "sync")
+
+	presets := readFile(t, filepath.Join(proj, "CMakePresets.json"))
+	if !strings.Contains(presets, `"Release"`) {
+		t.Errorf("the release build type did not reach the presets:\n%s", presets)
+	}
+}
+
+func TestCompileCommandsCanBeDisabled(t *testing.T) {
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "A")
+	proj := filepath.Join(dir, "A")
+
+	mPath := filepath.Join(proj, "cppm.json")
+	edited := strings.Replace(readFile(t, mPath), `"exportCompileCommands": true`, `"exportCompileCommands": false`, 1)
+	if err := os.WriteFile(mPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, proj, "sync")
+
+	if strings.Contains(readFile(t, filepath.Join(proj, "CMakePresets.json")), "EXPORT_COMPILE_COMMANDS") {
+		t.Error("compile_commands.json export should be absent when disabled")
+	}
+}
+
+// Declaring C is what stops CMake warning that CMAKE_C_COMPILER went unused,
+// and dependencies routinely contain C sources.
+func TestProjectEnablesCWhenACompilerIsConfigured(t *testing.T) {
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "A")
+	cml := readFile(t, filepath.Join(dir, "A", "CMakeLists.txt"))
+	if !strings.Contains(cml, "LANGUAGES CXX C") {
+		t.Errorf("expected C to be enabled alongside CXX:\n%s", cml)
+	}
+}

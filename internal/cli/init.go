@@ -130,16 +130,25 @@ func runInit(dir string, o *initOpts) error {
 		return err
 	}
 
-	// Compiler and generator are recorded in the manifest and rendered into
-	// CMakePresets.json, because CMAKE_CXX_COMPILER must be set before project()
-	// runs and so cannot come from the generated include.
-	if o.compiler != "" {
+	// Compiler and generator are written out explicitly, at their detected
+	// values, rather than left absent. CMAKE_CXX_COMPILER has to be set before
+	// project() runs, so these are rendered into CMakePresets.json; and a
+	// setting the user cannot see in cppm.json is one they cannot change.
+	switch {
+	case o.compiler != "":
 		cxx, changed := manifest.NormalizeCXX(o.compiler)
 		if changed {
 			fmt.Printf("  note: %q compiles C++ but does not link the C++ standard library; using %q\n",
 				o.compiler, cxx)
 		}
 		m.Toolchain.CXX = cxx
+	default:
+		if detected := toolchain.Compiler(); detected.Found() {
+			m.Toolchain.CXX = detected.Name
+		}
+	}
+	if m.Toolchain.CXX != "" {
+		m.Toolchain.C = manifest.CompanionC(m.Toolchain.CXX)
 	}
 
 	switch {

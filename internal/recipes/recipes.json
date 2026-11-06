@@ -1,0 +1,124 @@
+{
+  "comment": "Curated knowledge for common C++ libraries. Keyed by canonical repository URL. Two things live here: target names that no scanner can recover because they are built inside CMake helper macros, and cache options that cannot be discovered at all, such as a library quietly vendoring its own copy of a dependency.",
+  "recipes": {
+    "https://github.com/fmtlib/fmt.git": {
+      "targets": ["fmt::fmt"],
+      "options": { "FMT_DOC": "OFF", "FMT_TEST": "OFF", "FMT_INSTALL": "OFF" }
+    },
+    "https://github.com/gabime/spdlog.git": {
+      "targets": ["spdlog::spdlog"],
+      "options": { "SPDLOG_BUILD_EXAMPLE": "OFF", "SPDLOG_BUILD_TESTS": "OFF", "SPDLOG_INSTALL": "OFF" },
+      "notes": "Set SPDLOG_FMT_EXTERNAL=ON and add fmt yourself to avoid a second bundled copy of fmt."
+    },
+    "https://github.com/nlohmann/json.git": {
+      "targets": ["nlohmann_json::nlohmann_json"],
+      "options": { "JSON_BuildTests": "OFF", "JSON_Install": "OFF" }
+    },
+    "https://github.com/catchorg/Catch2.git": {
+      "targets": ["Catch2::Catch2WithMain"],
+      "alternatives": ["Catch2::Catch2"],
+      "options": { "CATCH_INSTALL_DOCS": "OFF", "CATCH_INSTALL_EXTRAS": "OFF", "CATCH_BUILD_TESTING": "OFF" },
+      "notes": "Catch2WithMain provides main(); use Catch2 if you write your own."
+    },
+    "https://github.com/google/googletest.git": {
+      "targets": ["GTest::gtest_main"],
+      "alternatives": ["GTest::gtest", "GTest::gmock", "GTest::gmock_main"],
+      "options": { "INSTALL_GTEST": "OFF", "BUILD_GMOCK": "ON", "gtest_force_shared_crt": "ON" },
+      "notes": "Targets are created by a helper macro, so no scanner can find them. gtest_force_shared_crt avoids an MSVC runtime mismatch."
+    },
+    "https://github.com/abseil/abseil-cpp.git": {
+      "targets": ["absl::base", "absl::strings"],
+      "options": { "ABSL_PROPAGATE_CXX_STD": "ON", "ABSL_ENABLE_INSTALL": "OFF", "BUILD_TESTING": "OFF" },
+      "notes": "Hundreds of absl:: targets built by helper functions; there is no single entry point, so pick the ones you use. ABSL_PROPAGATE_CXX_STD is required or abseil builds against a different standard than your project."
+    },
+    "https://gitlab.com/libeigen/eigen.git": {
+      "targets": ["Eigen3::Eigen"],
+      "options": { "EIGEN_BUILD_DOC": "OFF", "BUILD_TESTING": "OFF", "EIGEN_BUILD_PKGCONFIG": "OFF" }
+    },
+    "https://github.com/libsdl-org/SDL.git": {
+      "targets": ["SDL2::SDL2"],
+      "options": { "SDL_TEST": "OFF", "SDL_SHARED": "ON", "SDL_STATIC": "OFF" },
+      "notes": "SDL3 exports SDL3::SDL3 instead."
+    },
+    "https://github.com/jarro2783/cxxopts.git": {
+      "targets": ["cxxopts::cxxopts"],
+      "options": { "CXXOPTS_BUILD_EXAMPLES": "OFF", "CXXOPTS_BUILD_TESTS": "OFF" }
+    },
+    "https://github.com/marzer/tomlplusplus.git": {
+      "targets": ["tomlplusplus::tomlplusplus"],
+      "options": { "TOMLPLUSPLUS_BUILD_TESTS": "OFF", "TOMLPLUSPLUS_BUILD_EXAMPLES": "OFF" }
+    },
+    "https://github.com/google/benchmark.git": {
+      "targets": ["benchmark::benchmark"],
+      "alternatives": ["benchmark::benchmark_main"],
+      "options": { "BENCHMARK_ENABLE_TESTING": "OFF", "BENCHMARK_ENABLE_INSTALL": "OFF", "BENCHMARK_ENABLE_GTEST_TESTS": "OFF" },
+      "notes": "Named 'benchmark', which the veto rule would otherwise reject; the recipe bypasses discovery entirely."
+    },
+    "https://github.com/madler/zlib.git": {
+      "targets": ["ZLIB::ZLIB"],
+      "alternatives": ["zlib", "zlibstatic"],
+      "options": { "ZLIB_BUILD_EXAMPLES": "OFF" }
+    },
+    "https://github.com/google/re2.git": {
+      "targets": ["re2::re2"],
+      "options": { "RE2_BUILD_TESTING": "OFF" }
+    },
+    "https://github.com/pybind/pybind11.git": {
+      "targets": ["pybind11::headers"],
+      "alternatives": ["pybind11::module", "pybind11::embed"],
+      "options": { "PYBIND11_TEST": "OFF" }
+    },
+    "https://github.com/CLIUtils/CLI11.git": {
+      "targets": ["CLI11::CLI11"],
+      "options": { "CLI11_BUILD_TESTS": "OFF", "CLI11_BUILD_EXAMPLES": "OFF", "CLI11_BUILD_DOCS": "OFF" }
+    },
+    "https://github.com/libcpr/cpr.git": {
+      "targets": ["cpr::cpr"],
+      "options": { "CPR_BUILD_TESTS": "OFF", "CPR_ENABLE_SSL": "ON" }
+    },
+    "https://github.com/yhirose/cpp-httplib.git": {
+      "targets": ["httplib::httplib"],
+      "options": { "HTTPLIB_TEST": "OFF" }
+    },
+    "https://github.com/jbeder/yaml-cpp.git": {
+      "targets": ["yaml-cpp::yaml-cpp"],
+      "options": { "YAML_CPP_BUILD_TESTS": "OFF", "YAML_CPP_BUILD_TOOLS": "OFF", "YAML_CPP_INSTALL": "OFF" }
+    },
+    "https://github.com/g-truc/glm.git": {
+      "targets": ["glm::glm"],
+      "options": { "GLM_BUILD_TESTS": "OFF", "GLM_BUILD_INSTALL": "OFF" }
+    },
+    "https://github.com/glfw/glfw.git": {
+      "targets": ["glfw"],
+      "options": { "GLFW_BUILD_DOCS": "OFF", "GLFW_BUILD_TESTS": "OFF", "GLFW_BUILD_EXAMPLES": "OFF", "GLFW_INSTALL": "OFF" },
+      "notes": "glfw exports a bare target with no namespace."
+    },
+    "https://github.com/ocornut/imgui.git": {
+      "targets": [],
+      "notes": "imgui ships no CMakeLists.txt at all. Add the sources to your own target instead; cppm cannot wire it up."
+    },
+    "https://github.com/boostorg/boost.git": {
+      "targets": ["Boost::headers"],
+      "options": { "BOOST_INCLUDE_LIBRARIES": "", "BUILD_TESTING": "OFF" },
+      "notes": "Very large. Prefer your system package manager, or set BOOST_INCLUDE_LIBRARIES to just the libraries you need."
+    },
+    "https://github.com/doctest/doctest.git": {
+      "targets": ["doctest::doctest"],
+      "options": { "DOCTEST_WITH_TESTS": "OFF", "DOCTEST_NO_INSTALL": "ON" }
+    },
+    "https://github.com/Neargye/magic_enum.git": {
+      "targets": ["magic_enum::magic_enum"],
+      "options": { "MAGIC_ENUM_OPT_BUILD_EXAMPLES": "OFF", "MAGIC_ENUM_OPT_BUILD_TESTS": "OFF" }
+    },
+    "https://github.com/Tencent/rapidjson.git": {
+      "targets": [],
+      "alternatives": ["RapidJSON"],
+      "options": { "RAPIDJSON_BUILD_TESTS": "OFF", "RAPIDJSON_BUILD_DOC": "OFF", "RAPIDJSON_BUILD_EXAMPLES": "OFF" },
+      "notes": "Header-only and exports no usable imported target from a subdirectory build; add its include directory manually."
+    },
+    "https://github.com/catchorg/Catch2.git#v2": {
+      "targets": ["Catch2::Catch2"],
+      "notes": "Catch2 v2 has no WithMain target."
+    }
+  }
+}

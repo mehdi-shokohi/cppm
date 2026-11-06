@@ -37,7 +37,13 @@ func CMakeLists(m *manifest.Manifest) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "cmake_minimum_required(VERSION %s)\n\n", m.CMake.Minimum)
-	fmt.Fprintf(&b, "project(%s\n    VERSION %s\n    LANGUAGES CXX\n)\n\n", m.Name, m.Version)
+	languages := "CXX"
+	if m.Toolchain.C != "" {
+		// Dependencies routinely contain C sources, and declaring C here is
+		// also what stops CMake warning that CMAKE_C_COMPILER went unused.
+		languages = "CXX C"
+	}
+	fmt.Fprintf(&b, "project(%s\n    VERSION %s\n    LANGUAGES %s\n)\n\n", m.Name, m.Version, languages)
 
 	b.WriteString("# cppm-managed settings: the C++ standard from cppm.json and the\n")
 	b.WriteString("# dependencies it declares, pinned by cppm.lock.\n")
@@ -301,10 +307,12 @@ func Presets(m *manifest.Manifest) (string, error) {
 		cache["CMAKE_C_COMPILER"] = m.Toolchain.C
 	}
 
-	mk := func(name, display, buildType string) preset {
+	mk := func(name, display string) preset {
 		cv := map[string]string{
-			"CMAKE_BUILD_TYPE":              buildType,
-			"CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+			"CMAKE_BUILD_TYPE": m.CMake.BuildTypeFor(name),
+		}
+		if m.CMake.WantCompileCommands() {
+			cv["CMAKE_EXPORT_COMPILE_COMMANDS"] = "ON"
 		}
 		for k, v := range cache {
 			cv[k] = v
@@ -329,8 +337,8 @@ func Presets(m *manifest.Manifest) (string, error) {
 			},
 		},
 		ConfigurePresets: []preset{
-			mk("debug", "Debug", "Debug"),
-			mk("release", "Release", "RelWithDebInfo"),
+			mk("debug", "Debug"),
+			mk("release", "Release"),
 		},
 		BuildPresets: []buildPreset{
 			{Name: "debug", ConfigurePreset: "debug"},

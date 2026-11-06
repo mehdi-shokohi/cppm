@@ -88,7 +88,7 @@ func ParseSpec(raw string) (Spec, error) {
 		if strings.HasPrefix(p, "-") {
 			return Spec{}, fmt.Errorf("%q: path must not begin with '-'", raw)
 		}
-		return Spec{Name: deriveName(path.Base(strings.TrimRight(filepath(p), "/"))), Source: "path", Path: p}, nil
+		return Spec{Name: deriveName(path.Base(strings.TrimRight(toSlash(p), "/"))), Source: "path", Path: p}, nil
 
 	case "http", "https", "ssh", "git":
 		u, err := url.Parse(body)
@@ -174,6 +174,6 @@ func deriveName(base string) string {
 // ValidName reports whether a dependency name is usable.
 func ValidName(s string) bool { return nameRe.MatchString(s) }
 
-// filepath is a tiny shim so this file does not import path/filepath purely for
-// ToSlash; specs are always written with forward slashes.
-func filepath(p string) string { return strings.ReplaceAll(p, `\`, "/") }
+// toSlash normalises a spec's path separators; specs are always written with
+// forward slashes regardless of platform.
+func toSlash(p string) string { return strings.ReplaceAll(p, `\`, "/") }

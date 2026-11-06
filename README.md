@@ -38,17 +38,21 @@ v1 is three things: start a project, download a dependency, wire it into CMake.
 
 | Working | Not yet |
 |---|---|
-| `init` — scaffold a project that builds | `add` / `remove` |
-| `sync` — regenerate managed CMake | dependency fetching |
-| `build` — configure and build via presets | target discovery (designed and measured; not yet wired) |
-| `list`, `info` | Windows / macOS verification |
-| `doctor` — diagnose toolchain and project | |
-| `clean` | |
+| `init` — scaffold a project that builds | Transitive dependency pinning |
+| `add` / `remove` — git and local dependencies | Conflict detection |
+| `update` — re-resolve refs | Windows / macOS verification |
+| `sync` / `apply` — apply cppm.json to CMake | Non-CMake libraries |
+| `build` — configure and build via presets | |
+| Target discovery: recipes + source scan + ask | |
+| `list`, `info`, `doctor`, `clean` | |
 
 ## Commands
 
 ```
 cppm init [<dir>] [--std 20] [--name N] [--lib] [--compiler clang++] [--generator Ninja] [--force]
+cppm add <spec> [--target T] [--name N] [--non-interactive] [--no-discover] [--force]
+cppm remove <dep>...           alias: rm
+cppm update [<dep>...] [--dry-run]
 cppm sync [--quiet]            aliases: apply, regen
 cppm build [--debug|--release] [--clean] [--jobs N] [--target T] [--verbose]
 cppm list [--long]
@@ -60,9 +64,73 @@ cppm clean [--all]
 Flags work before or after positional arguments, so `cppm init MyApp --std 17` does what it looks
 like.
 
+## Adding dependencies
+
+```bash
+cppm add github:fmtlib/fmt@11.1.4
+cppm add github:nlohmann/json@v3.11.3
+cppm add gitlab:libeigen/eigen@3.4.0
+cppm add https://example.com/team/lib.git@main
+cppm add local:../MyLibrary
+```
+
+A version is an **opaque git ref** — a tag, branch or commit. cppm never parses or compares
+versions, so a library that ignores semver is not a problem. Ranges like `^1.2` are deliberately
+unsupported. With no `@ref`, cppm lists the repository's tags and asks which to pin.
+
+The ref is resolved to a **commit hash** and recorded in `cppm.lock`, because tags move.
+
+### Finding the right CMake target
+
+This is the part CMake will not help with. Asking a configured project for a dependency's targets
+returns only the raw ones — for fmt, `fmt;fmt-header-only` — while the name you are documented to
+link, `fmt::fmt`, is an `ALIAS`, and CMake has no API that lists aliases.
+
+So cppm tries, in order:
+
+1. **`--target`** — your explicit choice, always wins.
+2. **A curated recipe** — ~25 common libraries, carrying both target names and the cache options
+   that keep a dependency from building its own test suite.
+3. **A scan of the dependency's own CMake** — correct for 8 of 10 real libraries measured, with
+   zero confident errors.
+4. **Asking you**, with the candidates listed.
+
+It will **decline rather than guess**. A wrong target name produces a build that configures
+successfully and links the wrong thing, which is worse than an error:
+
+```
+targets:  unresolved
+          cppm could not determine what to link. Set it in cppm.json:
+            "mylib": { ..., "targets": ["<real::target>"] }
+          then run 'cppm sync'. Or link it yourself in CMakeLists.txt.
+```
+
+An inferred name is always labelled as inferred, never presented as fact.
+
 ## Changing settings
 
-`cppm.json` is the source of truth. Edit it and run `cppm sync` (also spelled `apply` or `regen`):
+`cppm.json` is the source of truth, and `cppm init` writes **every setting explicitly, even at its
+default**, so you can see what is there to change:
+
+```json
+{
+  "cxx":       { "standard": 20, "required": true, "extensions": false },
+  "cmake":     { "minimum": "3.24", "exportCompileCommands": true,
+                 "buildTypes": { "debug": "Debug", "release": "RelWithDebInfo" } },
+  "toolchain": { "cxx": "g++", "c": "gcc", "generator": "Ninja" }
+}
+```
+
+Notable choices, and why they are not what CMake would do on its own:
+
+| Setting | Default | Why |
+|---|---|---|
+| `cxx.extensions` | `false` | CMake defaults it **on**, which compiles your code as `gnu++NN` and leaves dependencies on mixed dialects |
+| `cmake.buildTypes.release` | `RelWithDebInfo` | a release build with no symbols is very hard to debug in the field; set `Release` for a smaller build |
+| `cmake.exportCompileCommands` | `true` | clangd and most editors need `compile_commands.json` for completion |
+| `toolchain.cxx` | the detected driver | written as `g++` or `clang++`, not the `c++` symlink, so you can see which compiler you are getting |
+
+Edit it and run `cppm sync` (also spelled `apply` or `regen`):
 
 ```bash
 $ vim cppm.json          # "standard": 17  ->  26

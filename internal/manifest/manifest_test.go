@@ -138,3 +138,87 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 		t.Error("expected a typo'd field to be rejected rather than silently ignored")
 	}
 }
+
+// init writes every setting explicitly, even at its default, so that the file
+// shows what can be changed.
+func TestNewWritesDefaultsExplicitly(t *testing.T) {
+	m := New("MyApp", 20)
+	b, err := m.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	for _, want := range []string{
+		`"exportCompileCommands": true`,
+		`"buildTypes"`,
+		`"debug": "Debug"`,
+		`"release": "RelWithDebInfo"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("a new manifest should spell out %s:\n%s", want, out)
+		}
+	}
+}
+
+// An absent field must mean "default", not "false"; otherwise a hand-written
+// manifest that omits it would silently lose compile_commands.json.
+func TestAbsentCompileCommandsMeansDefaultNotFalse(t *testing.T) {
+	var c CMake
+	if !c.WantCompileCommands() {
+		t.Error("an unset exportCompileCommands must default to true")
+	}
+	f := false
+	c.ExportCompileCommands = &f
+	if c.WantCompileCommands() {
+		t.Error("an explicit false must be honoured")
+	}
+}
+
+func TestBuildTypeFallsBackToDefaults(t *testing.T) {
+	var c CMake
+	if got := c.BuildTypeFor("debug"); got != "Debug" {
+		t.Errorf("debug -> %q, want Debug", got)
+	}
+	if got := c.BuildTypeFor("release"); got != "RelWithDebInfo" {
+		t.Errorf("release -> %q, want RelWithDebInfo", got)
+	}
+	c.BuildTypes = map[string]string{"release": "Release"}
+	if got := c.BuildTypeFor("release"); got != "Release" {
+		t.Errorf("an explicit build type must win, got %q", got)
+	}
+	if got := c.BuildTypeFor("debug"); got != "Debug" {
+		t.Errorf("an unlisted preset should still fall back, got %q", got)
+	}
+}
+
+func TestValidateRejectsBadBuildTypes(t *testing.T) {
+	m := New("MyApp", 20)
+	m.CMake.BuildTypes = map[string]string{"debug": "Fastest"}
+	if err := m.Validate(); err == nil {
+		t.Error("an invalid CMake build type should be rejected")
+	}
+	m.CMake.BuildTypes = map[string]string{"staging": "Debug"}
+	if err := m.Validate(); err == nil {
+		t.Error("an unknown preset name should be rejected")
+	}
+}
+
+// Invoking a C driver for C++ compiles but fails to link the standard library.
+func TestNormalizeCXXAndCompanionC(t *testing.T) {
+	for _, tc := range []struct{ in, cxx, c string }{
+		{"clang", "clang++", "clang"},
+		{"gcc", "g++", "gcc"},
+		{"clang++", "clang++", "clang"},
+		{"g++", "g++", "gcc"},
+		{"/usr/bin/gcc", "/usr/bin/g++", "/usr/bin/gcc"},
+		{"icpx", "icpx", ""},
+	} {
+		gotCXX, _ := NormalizeCXX(tc.in)
+		if gotCXX != tc.cxx {
+			t.Errorf("NormalizeCXX(%q) = %q, want %q", tc.in, gotCXX, tc.cxx)
+		}
+		if gotC := CompanionC(gotCXX); gotC != tc.c {
+			t.Errorf("CompanionC(%q) = %q, want %q", gotCXX, gotC, tc.c)
+		}
+	}
+}
