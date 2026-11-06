@@ -22,7 +22,7 @@ import (
 // This is the fallback for a build from source; a release binary gets the exact
 // tag via -ldflags. The "-dev" suffix is what distinguishes the two, so it must
 // stay: a lockfile's generated_by is the only record of what produced it.
-var Version = "0.2.2.1"
+var Version = "0.2.3"
 
 // Command is one subcommand.
 //

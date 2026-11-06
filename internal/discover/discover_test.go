@@ -314,3 +314,140 @@ add_library(widget::widget ALIAS widget)
 		t.Errorf("Best = %q, want widget::widget", res.Best)
 	}
 }
+
+// Modern CMake declares a library with no type keyword and fills it in later
+// with target_sources(). Requiring a type made the scanner blind to this form.
+func TestFindsUntypedTargetDeclaration(t *testing.T) {
+	root := tree(t, map[string]string{
+		"CMakeLists.txt": `
+project(drogon)
+add_library(${PROJECT_NAME})
+target_sources(${PROJECT_NAME} PRIVATE lib/src/HttpServer.cc)
+`,
+	})
+	res, err := Scan(root, "drogon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Confident {
+		t.Fatalf("expected confidence, got %q", res.Why)
+	}
+	if res.Best != "drogon" {
+		t.Errorf("Best = %q, want drogon", res.Best)
+	}
+}
+
+// An untyped declaration must not swallow a typed one: add_library(foo STATIC
+// a.c) is a STATIC target, not an untyped target named foo.
+func TestUntypedFormDoesNotShadowTypedDeclarations(t *testing.T) {
+	root := tree(t, map[string]string{
+		"CMakeLists.txt": `
+project(fmt)
+add_library(fmt STATIC src/format.cc)
+add_library(fmt::fmt ALIAS fmt)
+`,
+	})
+	res, err := Scan(root, "fmt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Best != "fmt::fmt" {
+		t.Errorf("Best = %q, want fmt::fmt", res.Best)
+	}
+	for _, c := range res.Candidates {
+		if c.Name == "fmt" && c.Kind != "STATIC" {
+			t.Errorf("fmt Kind = %q, want STATIC", c.Kind)
+		}
+	}
+}
+
+// The drogon regression, in the shape that produced it: the package's own
+// target is declared untyped, and every other add_library() in the tree is an
+// IMPORTED wrapper that a find-module creates for one of drogon's own
+// dependencies. Before the IMPORTED veto, coz::coz scored 70 and won on the
+// strength of being namespaced, while drogon itself was never a candidate.
+func TestVetoesImportedFindModuleTargets(t *testing.T) {
+	root := tree(t, map[string]string{
+		"CMakeLists.txt": `
+project(drogon)
+add_library(${PROJECT_NAME})
+find_package(Jsoncpp REQUIRED)
+`,
+		"cmake_modules/Findcoz-profiler.cmake": `
+add_library(coz::coz INTERFACE IMPORTED)
+`,
+		"cmake_modules/FindJsoncpp.cmake": `
+add_library(Jsoncpp_lib INTERFACE IMPORTED)
+`,
+		"cmake_modules/FindFilesystem.cmake": `
+add_library(std::filesystem INTERFACE IMPORTED)
+`,
+	})
+	res, err := Scan(root, "drogon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Best != "drogon" {
+		t.Fatalf("Best = %q, want drogon (why: %q)", res.Best, res.Why)
+	}
+	if !res.Confident {
+		t.Errorf("expected confidence, got %q", res.Why)
+	}
+	if res.Unrelated {
+		t.Error("Unrelated should be false for a package that owns its best target")
+	}
+	for _, c := range res.Candidates {
+		if c.Imported {
+			t.Errorf("imported target %q survived into the live set", c.Name)
+		}
+	}
+	if len(res.Rejected) != 3 {
+		t.Errorf("Rejected = %d candidates, want 3", len(res.Rejected))
+	}
+}
+
+// A tree whose only add_library() calls are find-module imports has nothing to
+// offer, and saying so beats recommending someone else's library.
+func TestImportedOnlyTreeDeclines(t *testing.T) {
+	root := tree(t, map[string]string{
+		"CMakeLists.txt": "project(thing)\n",
+		"cmake_modules/FindFoo.cmake": `
+add_library(foo::foo INTERFACE IMPORTED)
+add_library(Bar_lib UNKNOWN IMPORTED)
+`,
+	})
+	res, err := Scan(root, "thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Confident {
+		t.Errorf("expected no confidence, got Best = %q", res.Best)
+	}
+	if len(res.Candidates) != 0 {
+		t.Errorf("Candidates = %v, want none", res.TopNames(5))
+	}
+	if res.Why == "" {
+		t.Error("Why should explain that every candidate was an import")
+	}
+}
+
+// Unrelated is what tells the prompt to withhold its Enter-key default.
+func TestUnrelatedIsFlaggedForThePrompt(t *testing.T) {
+	root := tree(t, map[string]string{
+		"CMakeLists.txt": `
+project(someproj)
+add_subdirectory(sub)
+`,
+		"sub/CMakeLists.txt": "add_library(totally::different INTERFACE)\n",
+	})
+	res, err := Scan(root, "someproj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Confident {
+		t.Fatalf("expected no confidence, got Best = %q", res.Best)
+	}
+	if !res.Unrelated {
+		t.Errorf("Unrelated = false, want true (why: %q)", res.Why)
+	}
+}

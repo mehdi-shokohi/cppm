@@ -40,6 +40,10 @@ type Result struct {
 	ProjectName string
 	// Confident reports whether Best should be used without asking.
 	Confident bool
+	// Unrelated reports that Best was kept only for lack of anything better and
+	// does not look like it belongs to this package. Callers that prompt should
+	// not offer it as a default; it is the one answer cppm believes is wrong.
+	Unrelated bool
 	// Why explains a refusal in one line.
 	Why string
 }
@@ -52,6 +56,10 @@ type Candidate struct {
 	Score   int
 	Reasons []string
 	Veto    string // non-empty if disqualified
+	// Imported marks a target declared with add_library(... IMPORTED): a
+	// reference to a prebuilt library found elsewhere, not something this
+	// package builds.
+	Imported bool
 	// File is the CMake file that defines the target, relative to the source
 	// root. Needed to tell a target the build really creates from one that only
 	// a packaging module defines; see reachableFrom.
@@ -60,10 +68,29 @@ type Candidate struct {
 
 var (
 	reAlias = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.${}-]+)\s+ALIAS\s+([A-Za-z0-9_.${}-]+)\s*\)`)
-	reReal  = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.${}-]+)\s+(INTERFACE|STATIC|SHARED|MODULE|OBJECT)\b`)
-	reProj  = regexp.MustCompile(`(?is)\bproject\s*\(\s*([A-Za-z0-9_.-]+)`)
-	reSet   = regexp.MustCompile(`(?is)\bset\s*\(\s*([A-Za-z0-9_]+)\s+([^)]*)\)`)
-	reVar   = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
+
+	// This captures one group past the type so IMPORTED can be seen. An
+	// IMPORTED target is a handle on a library the project does not build, which
+	// disqualifies it outright; see the veto in Scan. UNKNOWN is in the type
+	// list only because it is valid solely in the IMPORTED form, so including it
+	// is how those get caught rather than ignored.
+	//
+	// The match deliberately does not require the closing paren: an argument
+	// list can contain one inside a generator expression, and demanding it would
+	// silently drop real targets.
+	reReal = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.${}-]+)\s+(INTERFACE|STATIC|SHARED|MODULE|OBJECT|UNKNOWN)\b(\s+IMPORTED\b)?`)
+
+	// add_library(<name>) with no type keyword at all. The type comes from
+	// BUILD_SHARED_LIBS and the sources arrive later through target_sources().
+	//
+	// Requiring a type keyword made this scanner blind to exactly that form, and
+	// drogon declares its one real target that way -- add_library(${PROJECT_NAME})
+	// on line 56, sources added further down. The scan found no target belonging
+	// to drogon at all and ranked an import from its cmake_modules/ first.
+	reUntyped = regexp.MustCompile(`(?is)\badd_library\s*\(\s*([A-Za-z0-9_:.${}-]+)(?:\s+EXCLUDE_FROM_ALL)?\s*\)`)
+	reProj    = regexp.MustCompile(`(?is)\bproject\s*\(\s*([A-Za-z0-9_.-]+)`)
+	reSet     = regexp.MustCompile(`(?is)\bset\s*\(\s*([A-Za-z0-9_]+)\s+([^)]*)\)`)
+	reVar     = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
 
 	// The two ways a CMake file pulls in another. The \s*\( guard keeps
 	// include_directories() and include_guard() out of reInclude.
@@ -118,6 +145,17 @@ func Scan(root, pkgName string) (Result, error) {
 
 	var live, dead []Candidate
 	for _, c := range raw {
+		// An IMPORTED target is what a Find<Pkg>.cmake module creates to wrap one
+		// of *this* package's own dependencies. It is never what a consumer links
+		// this package for, and it frequently does not exist at all, because the
+		// find_package() that would define it sits behind an off-by-default
+		// option. Scanning drogon offered ten candidates and every one was an
+		// import out of its cmake_modules/: coz::coz, Jsoncpp_lib, UUID_lib.
+		if c.Imported {
+			c.Veto = "imported"
+			dead = append(dead, c)
+			continue
+		}
 		if marker, bad := vetoed(c.Name, aliases); bad {
 			c.Veto = marker
 			dead = append(dead, c)
@@ -133,11 +171,12 @@ func Scan(root, pkgName string) (Result, error) {
 	res := Result{Candidates: live, Rejected: dead, ProjectName: projectName}
 	switch {
 	case len(live) == 0 && len(dead) > 0:
-		res.Why = "every candidate looked like test or example scaffolding"
+		res.Why = describeDead(dead)
 	case len(live) == 0:
 		res.Why = "no add_library() calls with literal names; targets are probably built by helper macros"
 	case !related(live[0].Name, aliases):
 		res.Best = live[0].Name
+		res.Unrelated = true
 		res.Why = "the best candidate does not look like it belongs to this package"
 	default:
 		res.Best = live[0].Name
@@ -411,7 +450,7 @@ func expand(s string, vars map[string]string) string {
 
 func extractTargets(files []cmakeFile, vars map[string]string) []Candidate {
 	seen := map[string]*Candidate{}
-	add := func(name, kind, file string, isAlias bool) {
+	add := func(name, kind, file string, isAlias, imported bool) {
 		name = expand(strings.TrimSpace(name), vars)
 		// Still unresolved after expansion: not usable as a link name.
 		if name == "" || strings.Contains(name, "$") {
@@ -421,16 +460,26 @@ func extractTargets(files []cmakeFile, vars map[string]string) []Candidate {
 			if isAlias {
 				c.IsAlias, c.Kind = true, "ALIAS"
 			}
+			// A name declared both as an IMPORTED handle and as a real target is
+			// a real target: some projects declare an import in a find-module and
+			// build the same name themselves when the module finds nothing.
+			if !imported {
+				c.Imported = false
+			}
 			return
 		}
-		seen[name] = &Candidate{Name: name, IsAlias: isAlias, Kind: kind, File: file}
+		seen[name] = &Candidate{Name: name, IsAlias: isAlias, Kind: kind, File: file, Imported: imported}
 	}
 	for _, f := range files {
 		for _, m := range reAlias.FindAllStringSubmatch(f.text, -1) {
-			add(m[1], "ALIAS", f.rel, true)
+			add(m[1], "ALIAS", f.rel, true, false)
 		}
 		for _, m := range reReal.FindAllStringSubmatch(f.text, -1) {
-			add(m[1], strings.ToUpper(m[2]), f.rel, false)
+			add(m[1], strings.ToUpper(m[2]), f.rel, false, m[3] != "")
+		}
+		// An untyped declaration can never be IMPORTED: that form requires a type.
+		for _, m := range reUntyped.FindAllStringSubmatch(f.text, -1) {
+			add(m[1], "UNTYPED", f.rel, false, false)
 		}
 	}
 	out := make([]Candidate, 0, len(seen))
@@ -445,6 +494,28 @@ func splitName(name string) (ns, bare string) {
 		return name[:i], name[i+2:]
 	}
 	return "", name
+}
+
+// describeDead explains a scan in which every candidate was disqualified.
+//
+// The distinction is worth drawing because it changes what the user should do
+// next: scaffolding means the scanner looked in the wrong place, whereas an
+// all-imported result means this package's own target is built somewhere a
+// regex cannot see and the real name has to come from its documentation.
+func describeDead(dead []Candidate) string {
+	imported := 0
+	for _, c := range dead {
+		if c.Veto == "imported" {
+			imported++
+		}
+	}
+	switch {
+	case imported == len(dead):
+		return "every candidate was an IMPORTED target from a find-module, i.e. one of this package's own dependencies"
+	case imported > 0:
+		return "every candidate was either an IMPORTED find-module target or test scaffolding"
+	}
+	return "every candidate looked like test or example scaffolding"
 }
 
 func vetoed(name string, aliases []string) (string, bool) {

@@ -374,11 +374,23 @@ func askForTarget(dep string, scan discover.Result, nonInteractive bool) (string
 		fmt.Printf("  %2d) %s\n", i+1, name)
 	}
 	fmt.Printf("   0) decide later -- cppm will tell you where to put it\n")
-	fmt.Printf("choice [1]: ")
+	fmt.Printf("\nOr type a target name. The name to trust is the one in %s's own\n", dep)
+	fmt.Printf("README or install docs, which is often not in the list above.\n")
+
+	// When discovery has already judged its own top pick unrelated to the
+	// package, offering it on the Enter key hands the user the one answer cppm
+	// believes is wrong -- and a plausible-looking namespaced name is impossible
+	// to second-guess from the prompt alone. Withhold the default instead.
+	def := "1"
+	if scan.Unrelated || len(shown) == 0 {
+		def = "0"
+		fmt.Printf("\nNone of these look like they belong to %s, so there is no default.\n", dep)
+	}
+	fmt.Printf("choice [%s]: ", def)
 
 	line := readLine()
 	if line == "" {
-		line = "1"
+		line = def
 	}
 	n, err := strconv.Atoi(line)
 	switch {

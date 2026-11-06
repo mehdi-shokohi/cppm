@@ -15,56 +15,34 @@ re-expose what CMake already does well are declined.
 
 ---
 
-## v0.2 — Making your C++ project safer
+## Versioning
 
-The headline feature set, and the one with the clearest payoff. Everything here is about the code
-**cppm builds for you**: catching undefined behaviour, memory errors and data races in your own C++,
-with the configuration already written.
+A tag is plain semver and names a release, not a roadmap item. `v0.2.3` is the release after
+`v0.2.2`, whether it carries a roadmap item or only fixes.
 
-The theme was that cppm could build your project but could not *run* anything, which blocked every
-form of checking: every item below is, at bottom, "run the tests under X". **0.2.1 and 0.2.2 shipped
-in `v0.2.2`**, so that blocker is gone and the rest of this section is now unblocked work.
+Earlier tags did encode the roadmap: `v0.2.2` meant "roadmap items through 0.2.2 are in", which left
+no room for a fixes-only release and forced a fourth component — `v0.2.2.1`, "`v0.2.2` plus fixes".
+That scheme is retired. Four-part tags are not used again, `v0.2.2.1` stays in the history, and the
+next tag is **`v0.2.3`**.
+
+The consequence is that **`v0.2` is closed to new features**: the 0.2 line now takes fixes only, and
+the safety work that was numbered 0.2.3 through 0.2.8 moved to [v0.3](#v03--making-your-c-project-safer)
+as items 0.3.1 through 0.3.6. Item numbers and tag numbers are no longer the same thing, so an item
+ships in whichever release it is ready for.
+
+---
+
+## v0.2 — Running your project's tests — **done**
+
+cppm could build your project but could not *run* anything, which blocked every form of checking:
+every safety item in v0.3 is, at bottom, "run the tests under X". Removing that blocker is what this
+release was for, and both items shipped in `v0.2.2`.
 
 | Item | Status |
 |---|---|
 | 0.2.1 `cppm test` | **done** — `v0.2.2` |
 | 0.2.2 Dev-only dependencies | **done** — `v0.2.2` |
-| 0.2.3 Warnings and hardening | **next** |
-| 0.2.4 Debug standard library | planned |
-| 0.2.5 Sanitizer presets | planned |
-| 0.2.6 Valgrind, Helgrind and DRD | planned |
-| 0.2.7 Static analysis | planned |
-| 0.2.8 CI stages | planned |
 
-Tags follow this numbering rather than a semver patch series: `v0.2.2` means "roadmap items through
-0.2.2 are in", and there was no `v0.2.0` or `v0.2.1`.
-
-Because a tag names a roadmap item, the scheme leaves no room for a release that ships only fixes:
-a `v0.2.3` tag would assert that item 0.2.3 is in. Fix releases therefore take a fourth component.
-`v0.2.2.1` reads as "`v0.2.2` plus fixes, no new roadmap item". They are recorded under
-[Fix releases](#fix-releases) and never change an item's status.
-
-The checks stack, cheapest first — a project should adopt them in this order:
-
-```
-warnings          no runtime cost, catches the most per unit of effort
-hardening         negligible cost, safe for release builds
-debug STL         only works because cppm builds dependencies from source
-sanitizers        5-15x slower, finds races and memory errors precisely
-valgrind          20-100x slower, no recompilation, finds lock-order bugs
-static analysis   no runtime at all, runs in CI
-```
-
-Each of those is both a local command and a **CI stage** (0.2.8). One declaration in `cppm.json`
-drives the local preset and the generated pipeline, so a check cannot pass on your machine and fail
-in CI because two files drifted apart.
-
-The stack is also why the `checks` block in 0.2.8 is a **closed set** of names cppm knows, not a
-place to plug in an arbitrary external tool. cppm's value in each row above is the gotchas it
-encodes — ASan and TSan are mutually exclusive, never run an instrumented binary under valgrind,
-`CMAKE_CXX_CLANG_TIDY` leaks into dependencies — and it cannot know those for a tool named at
-runtime. A generic step runner would remove no CMake knowledge, which is this document's bar for
-inclusion.
 
 ### 0.2.1 `cppm test` — a CTest wrapper — **done**
 
@@ -93,7 +71,7 @@ What was learned building it, because it shaped the design:
   `BUILD_TESTING` off across the dependency section (a plain variable, so dependencies'
   `option(BUILD_TESTING ...)` calls become no-ops under CMP0077) and restores it afterwards.
 - **`include(CTest)`, not a bare `enable_testing()`.** The module writes the
-  `DartConfiguration.tcl` that `ctest -T memcheck` reads, which 0.2.6 needs.
+  `DartConfiguration.tcl` that `ctest -T memcheck` reads, which 0.3.4 needs.
 - **It is guarded by `PROJECT_IS_TOP_LEVEL`**, so a cppm project consumed through
   `add_subdirectory` does not switch testing on in its parent.
 - **`cppm test` builds first.** A test run against a stale build tree reports on code that is no
@@ -140,7 +118,47 @@ How it ended up working, and why:
 - `--target` now also applies to `local:` dependencies. It was documented for `add` but
   `addPath` never consulted it, so a local library's target name could not be pinned at all.
 
-### 0.2.3 Warnings and hardening — the cheapest safety there is — **next**
+---
+
+## v0.3 — Making your C++ project safer
+
+The headline feature set, and the one with the clearest payoff. Everything here is about the code
+**cppm builds for you**: catching undefined behaviour, memory errors and data races in your own C++,
+with the configuration already written. It is unblocked work: `cppm test` landed in `v0.2.2`, so
+every item below now has something to run.
+
+| Item | Status |
+|---|---|
+| 0.3.1 Warnings and hardening | **next** |
+| 0.3.2 Debug standard library | planned |
+| 0.3.3 Sanitizer presets | planned |
+| 0.3.4 Valgrind, Helgrind and DRD | planned |
+| 0.3.5 Static analysis | planned |
+| 0.3.6 CI stages | planned |
+
+The checks stack, cheapest first — a project should adopt them in this order:
+
+```
+warnings          no runtime cost, catches the most per unit of effort
+hardening         negligible cost, safe for release builds
+debug STL         only works because cppm builds dependencies from source
+sanitizers        5-15x slower, finds races and memory errors precisely
+valgrind          20-100x slower, no recompilation, finds lock-order bugs
+static analysis   no runtime at all, runs in CI
+```
+
+Each of those is both a local command and a **CI stage** (0.3.6). One declaration in `cppm.json`
+drives the local preset and the generated pipeline, so a check cannot pass on your machine and fail
+in CI because two files drifted apart.
+
+The stack is also why the `checks` block in 0.3.6 is a **closed set** of names cppm knows, not a
+place to plug in an arbitrary external tool. cppm's value in each row above is the gotchas it
+encodes — ASan and TSan are mutually exclusive, never run an instrumented binary under valgrind,
+`CMAKE_CXX_CLANG_TIDY` leaks into dependencies — and it cannot know those for a tool named at
+runtime. A generic step runner would remove no CMake knowledge, which is this document's bar for
+inclusion.
+
+### 0.3.1 Warnings and hardening — the cheapest safety there is — **next**
 
 Worth doing before sanitizers, because it costs no runtime and catches a different, larger class of
 bug. Most C++ projects ship with warnings effectively off because nobody remembers the flags.
@@ -173,9 +191,9 @@ Gotchas to encode rather than let users hit:
   3.25, where warnings from fmt and spdlog would otherwise drown the user's own.
 - **`_FORTIFY_SOURCE` silently does nothing at `-O0`** and warns on redefinition. Set it only for
   optimised configurations.
-- **`-D_GLIBCXX_DEBUG` is a separate, heavier thing** — see 0.2.4.
+- **`-D_GLIBCXX_DEBUG` is a separate, heavier thing** — see 0.3.2.
 
-### 0.2.4 Debug standard library
+### 0.3.2 Debug standard library
 
 Catches iterator invalidation, out-of-range access and container misuse that neither warnings nor
 ASan reliably find.
@@ -193,7 +211,7 @@ most projects never turn it on.
 flags, so the whole program is consistent by construction. This is a genuine advantage of the
 FetchContent model and should be documented as one.
 
-### 0.2.5 Sanitizer presets
+### 0.3.3 Sanitizer presets
 
 New configure presets, selected by `cppm build --sanitize=<name>`:
 
@@ -234,7 +252,7 @@ Constraints the tool must encode, not leave to be discovered:
 - Useful defaults: `ASAN_OPTIONS=abort_on_error=1:detect_stack_use_after_return=1`,
   `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`, `TSAN_OPTIONS=second_deadlock_stack=1`.
 
-### 0.2.6 Valgrind, Helgrind and DRD
+### 0.3.4 Valgrind, Helgrind and DRD
 
 A different mechanism: no recompilation, the binary runs under emulation. Wired through CTest's
 built-in memcheck support rather than reinvented.
@@ -280,7 +298,7 @@ Constraints to encode:
   `doctor` should recommend ASan/TSan, which overlap heavily.
 - Memcheck is 10–50× slower, so it belongs in a nightly job rather than on every push.
 
-### 0.2.7 Static analysis
+### 0.3.5 Static analysis
 
 Finds bugs without running anything, which makes it the cheapest check in CI.
 
@@ -298,7 +316,7 @@ findings would not be the user's to fix. It must be applied as a **per-target pr
 own targets only**. This is the kind of detail that makes the feature worth cppm owning rather than
 leaving to a snippet copied from a blog post.
 
-### 0.2.8 CI stages for your project
+### 0.3.6 CI stages for your project
 
 Today cppm has CI for *itself* and generates none for you. Wiring an ASan job in GitHub Actions is
 the same category of work as wiring ASan in CMake: a dozen fiddly lines nobody remembers. So it
@@ -392,9 +410,9 @@ generating rather than documenting:
 - sanitizer environment defaults
 - `cppm ci --github` → the workflow above, with caching and the platform exclusions already correct
 
-## v0.3 — Correctness and reproducibility
+## v0.4 — Correctness and reproducibility
 
-### 0.3.1 Transitive dependency pinning
+### 0.4.1 Transitive dependency pinning
 
 The largest known correctness gap. `cppm.lock` records what cppm fetches; when a dependency
 resolves its own dependencies, that is neither pinned nor recorded, so the lockfile is an incomplete
@@ -406,25 +424,25 @@ installed via `CMAKE_PROJECT_TOP_LEVEL_INCLUDES` intercepts `find_package()` and
 copies. Unproven in this codebase and the most likely source of surprises, so it should be spiked
 before the version is scoped.
 
-### 0.3.2 Conflict detection
+### 0.4.2 Conflict detection
 
-Falls out of 0.3.1 almost free: the provider sees every version request, so two dependencies
+Falls out of 0.4.1 almost free: the provider sees every version request, so two dependencies
 disagreeing about fmt becomes detectable. Reported, with an `overrides` entry suggested — never
 solved automatically, since cppm does not compare versions.
 
-### 0.3.3 Duplicate-copy detection
+### 0.4.3 Duplicate-copy detection
 
 Adding both fmt and spdlog yields two copies of fmt, because spdlog compiles its bundled one.
 Fixing it requires `SPDLOG_FMT_EXTERNAL=ON` *and* fmt being present — coordination cppm could do
 and currently does not. At minimum `doctor` should warn that a dependency is being built twice.
 
-### 0.3.4 Target collision diagnosis
+### 0.4.4 Target collision diagnosis
 
 Two dependencies each defining `uninstall` or `docs` is a hard configure failure with no clean
 workaround. cppm cannot fix it, but it can recognise the error and explain the cause instead of
 leaving the user with a raw CMake message.
 
-### 0.3.5 Harvest the dependency's own `option()` declarations
+### 0.4.5 Harvest the dependency's own `option()` declarations
 
 The generic `BUILD_TESTING` guard (constraint 7) covers far less than it appears to. Measured
 against the recipe database itself: of 25 libraries with a recorded test or example switch, **3 use
@@ -444,7 +462,7 @@ The suppressions must be **written into `cppm.json`, not applied invisibly**. Th
 guess show up in a diff instead of buried in generated CMake. It also raises the floor for every
 uncurated library without adding a single recipe.
 
-### 0.3.6 Say when a dependency is uncurated
+### 0.4.6 Say when a dependency is uncurated
 
 `cppm add` reports the same success for a curated library and an uncurated one. fmt arrives with a
 verified target and three options from its recipe; duckdb arrived with no target, no options, and
@@ -456,7 +474,7 @@ from CMake, that nothing is known about the options it needs, and that `cppm.jso
 need adjusting. Pair it with a `cppm recipe --export <dep>` that prints a contributable entry, which
 is the only way a 26-entry database becomes a 200-entry one. Costs no schema change.
 
-### 0.3.7 `doctor` should audit dependencies, not just tools
+### 0.4.7 `doctor` should audit dependencies, not just tools
 
 `doctor` checks the toolchain and the project's own settings and has no opinion about the
 dependencies, which is where the risk actually sits. Four static checks, all cheap, all from the
@@ -468,10 +486,10 @@ already-cached source:
 - **Exports no include path** — no `target_include_directories` on the linked target. True of
   duckdb, zlib and rapidjson.
 - **Injects its own flags** — writes `CMAKE_CXX_FLAGS`, `CMAKE_CXX_FLAGS_<CONFIG>`, or calls
-  `add_compile_options`. Feeds 0.2.5.
-- **`option()` defaults still ON** that 0.3.5 would have caught.
+  `add_compile_options`. Feeds 0.3.3.
+- **`option()` defaults still ON** that 0.4.5 would have caught.
 
-### 0.3.8 Include directories through `cppm_link_dependencies`
+### 0.4.8 Include directories through `cppm_link_dependencies`
 
 Three of 26 recipes end with some form of "add the include directory yourself" — duckdb, zlib,
 rapidjson — because a library can publish headers with a directory-scoped `include_directories()`
@@ -485,7 +503,7 @@ rather than just doing.
 
 ---
 
-## v0.4 — Platform parity
+## v0.5 — Platform parity
 
 1. **MSVC runtime library mismatch** — dependencies built `/MD` against an `/MT` consumer produce
    link errors that look unrelated to their cause. Needs `CMAKE_MSVC_RUNTIME_LIBRARY` propagated
@@ -499,8 +517,46 @@ rather than just doing.
 
 ## Fix releases
 
-Releases that ship only fixes. A fourth tag component, because a third would name a roadmap item
-that has not shipped. These never move an item's status in the tables above.
+Releases that ship only fixes. Under plain semver these are ordinary patch releases — see
+[Versioning](#versioning) — and they never move an item's status in the tables above. `v0.2.2.1`
+predates that change and is the last four-part tag.
+
+### `v0.2.3`
+
+Found by adding drogon to a real project. Drogon is the first dependency used whose own target is
+declared untyped, and the first whose tree is mostly find-modules; between them those two facts
+produced a candidate list in which every entry was wrong.
+
+- **Discovery could not see a target declared without a type.** `add_library(<name>)` with no
+  `STATIC`/`SHARED`/`INTERFACE` keyword, sources added afterwards by `target_sources()`, is a
+  common modern form and the one drogon uses. The scanner's regex required a type keyword, so
+  drogon's own and only target was never a candidate. `discover` now also matches the untyped form.
+
+- **`IMPORTED` targets were treated as candidates.** A `Find<Pkg>.cmake` module creates an imported
+  target to wrap one of *this* package's dependencies, which is never what a consumer links the
+  package for, and frequently does not exist at all because the `find_package()` that would define
+  it sits behind an off-by-default option. Drogon's `cmake_modules/` yielded ten of them, and
+  `coz::coz` — from a profiler drogon only uses when `COZ_PROFILING` is on — ranked first on the
+  strength of being a canonical `ns::ns` name. `discover` now vetoes imported targets outright.
+
+  The two bugs compounded: because the untyped form hid the one real target, *no* candidate was
+  reachable, and the reachability rule added in `v0.2.2.1` is skipped entirely in that case. The
+  guard meant to suppress noise is what let a find-module import reach the top of the list.
+
+- **The prompt offered its own rejected answer as the default.** `askForTarget` defaulted to
+  candidate 1 on the Enter key even when discovery had set `Confident=false` and `Why` said *"the
+  best candidate does not look like it belongs to this package"*. Discovery knew the list was
+  wrong and the prompt still made the wrong entry the easiest thing to pick. `Result.Unrelated` now
+  carries that judgement to the caller, which withholds the default and says there is none. The
+  prompt also now states that a name can be typed in — it always accepted one, but nothing said so,
+  which left a user facing ten wrong options with no visible way to answer correctly.
+
+Scanned against real trees after the change: drogon resolves to `drogon` confidently with all ten
+imports rejected, and duckdb is unchanged. fmt still resolves to `fmt::fmt-c` rather than
+`fmt::fmt` — a confidently wrong answer, pre-existing and not caused by these fixes. fmt builds
+`fmt::fmt` inside a function where the name is a parameter, so no scanner can read it; the recipe
+database supplies the right name, which is why this has never been visible in use. It is a live
+violation of constraint 8 and belongs with the regression corpus below.
 
 ### `v0.2.2.1`
 
@@ -525,7 +581,7 @@ independent failures, each hidden behind the previous, so only the first was vis
   things no option can fix: that its headers need adding by hand, and that `<duckdb.h>` is the C
   API while `<duckdb.hpp>` is C++.
 
-Not fixed here, and the reason 0.3.5 through 0.3.8 exist: the generic test-suppression guard misses
+Not fixed here, and the reason 0.4.5 through 0.4.8 exist: the generic test-suppression guard misses
 duckdb's `BUILD_UNITTESTS` entirely; duckdb's test tree resolves sources against the consumer's
 root, which is upstream's bug but cppm's configure failure; the include path cannot be expressed at
 all; and its Debug sanitizers break any consumer not built the same way.
@@ -541,7 +597,7 @@ Nothing here affects projects built with cppm.
 |---|---|
 | **Recipe smoke matrix in CI, nightly** | Recipes rot silently: a library renames a target or re-points a tag and the recipe becomes wrong. A scheduled job that adds and builds every recipe's library is the only way to notice. Scope it as *configure every recipe, build a sampled subset*: a Debug duckdb alone is ~175 targets and several minutes, so "build them all" would make this the longest job in the repo. |
 | **Fuzz the spec parser** | `go test -fuzz` on `vcs.ParseSpec`. It takes untrusted input and feeds it to git, so it is the highest-value fuzz target. |
-| **Discovery regression corpus** | Keep the measured library set as fixtures, and assert the confidently-wrong count stays at zero — that is the metric that matters, not the hit rate. Started: duckdb is the first recorded confidently-wrong case, kept at zero by the reachability rule in `v0.2.2.1`. |
+| **Discovery regression corpus** | Keep the measured library set as fixtures, and assert the confidently-wrong count stays at zero — that is the metric that matters, not the hit rate. Started: duckdb is the first recorded confidently-wrong case, kept at zero by the reachability rule in `v0.2.2.1`. drogon (untyped target, all-imported tree) was added in `v0.2.3`. **fmt is an open confidently-wrong case** — `fmt::fmt-c` instead of `fmt::fmt`, masked in use by the recipe. |
 | **Golden-file tests for generated CMake** | Makes every change to generated output visible in review instead of inferred. |
 | **Coverage gate** | Report now, enforce a floor once it has settled. |
 | **Full `-race`** | CI currently runs `-race -short`; the network and build paths are not covered. |
@@ -567,19 +623,19 @@ Stating these saves repeated discussion, and each is a deliberate decision rathe
 
 ## Sequencing, and what to do next
 
-0.2 before 0.3, for two reasons. It is what users will actually ask for — "how do I run my tests
+v0.3 before v0.4, for two reasons. It is what users will actually ask for — "how do I run my tests
 under ASan" is a question people have today, whereas the transitive-pinning gap is invisible until
-it bites. And 0.3.1 is the one item that could still invalidate architecture, so it benefits from
+it bites. And 0.4.1 is the one item that could still invalidate architecture, so it benefits from
 the project being otherwise settled before it is attempted.
 
-Within 0.2, the order was forced: **dev-dependencies (0.2.2) had to land with or before `cppm test`
+Within v0.2 the order was forced: **dev-dependencies (0.2.2) had to land with or before `cppm test`
 (0.2.1)**, because a test command that links Catch2 into your release binary is wrong from the first
-release and becomes a breaking change to fix later. Both are now done.
+release and becomes a breaking change to fix later. Both are done, and v0.2 is closed to features.
 
-**Next is 0.2.3, warnings and hardening.** It is the best value per hour of work: no runtime cost,
+**Next is 0.3.1, warnings and hardening.** It is the best value per hour of work: no runtime cost,
 no new concepts for the user, and it catches more real bugs than any single sanitizer. Sanitizers
 and valgrind are more impressive but find a narrower class of problem more slowly.
 
-0.2.3 is also now cheap to verify, which it was not before: `cppm test` means a warning level can
+0.3.1 is also now cheap to verify, which it was not before: `cppm test` means a warning level can
 be asserted against a project that actually builds and runs, rather than only against the text of
 the generated CMake.

@@ -334,7 +334,7 @@ cppm cannot discover is the most useful small contribution.
 
 ## Roadmap
 
-[docs/ROADMAP.md](docs/ROADMAP.md). v0.2 is about making **your** C++ project safer, with the
+[docs/ROADMAP.md](docs/ROADMAP.md). v0.3 is about making **your** C++ project safer, with the
 configuration already written: strict warnings and hardening flags, a debug standard library,
 sanitizer presets (ASan, UBSan, TSan), valgrind/helgrind/DRD through CTest's memcheck, and
 clang-tidy — reached through `cppm test` and `cppm build --sanitize=...`.
