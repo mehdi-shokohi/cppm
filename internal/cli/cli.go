@@ -13,6 +13,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"cppm/internal/cmakegen"
 )
 
 // Version is cppm's own version, stamped into generated files and the lockfile.
@@ -25,6 +27,7 @@ var Version = "0.1.0-dev"
 // parser.
 type Command struct {
 	Name    string
+	Aliases []string
 	Summary string
 	Usage   string
 	Long    string
@@ -51,12 +54,29 @@ func lookup(name string) *Command {
 		if c.Name == name {
 			return c
 		}
+		for _, a := range c.Aliases {
+			if a == name {
+				return c
+			}
+		}
 	}
 	return nil
 }
 
+// allInvocableNames includes aliases, so typo suggestions cover them too.
+func allInvocableNames() []string {
+	var out []string
+	for _, c := range commands {
+		out = append(out, c.Name)
+		out = append(out, c.Aliases...)
+	}
+	return out
+}
+
 // Main runs the CLI and returns a process exit code.
 func Main(args []string) int {
+	cmakegen.Version = Version
+
 	if len(args) == 0 {
 		usage(os.Stdout)
 		return 0
@@ -125,6 +145,11 @@ commands:
 	for _, c := range commands {
 		fmt.Fprintf(w, "    %-*s  %s\n", width, c.Name, c.Summary)
 	}
+	for _, c := range commands {
+		if len(c.Aliases) > 0 {
+			fmt.Fprintf(w, "\naliases: %s -> %s\n", strings.Join(c.Aliases, ", "), c.Name)
+		}
+	}
 	fmt.Fprint(w, `
 run 'cppm help <command>' for details on one command.
 
@@ -137,6 +162,9 @@ getting started:
 
 func commandHelp(w io.Writer, c *Command) {
 	fmt.Fprintf(w, "cppm %s -- %s\n\nusage:\n    %s\n", c.Name, c.Summary, c.Usage)
+	if len(c.Aliases) > 0 {
+		fmt.Fprintf(w, "\naliases: %s\n", strings.Join(c.Aliases, ", "))
+	}
 	if c.Long != "" {
 		fmt.Fprintf(w, "\n%s\n", strings.TrimRight(c.Long, "\n"))
 	}
@@ -162,9 +190,9 @@ func newFlagSet(name string) *flag.FlagSet {
 // suggest returns the closest command name, for a typo hint.
 func suggest(given string) string {
 	best, bestDist := "", 1<<30
-	for _, c := range commands {
-		if d := editDistance(given, c.Name); d < bestDist {
-			best, bestDist = c.Name, d
+	for _, n := range allInvocableNames() {
+		if d := editDistance(given, n); d < bestDist {
+			best, bestDist = n, d
 		}
 	}
 	if bestDist <= 2 {

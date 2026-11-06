@@ -48,8 +48,8 @@ v1 is three things: start a project, download a dependency, wire it into CMake.
 ## Commands
 
 ```
-cppm init [<dir>] [--std 20] [--name N] [--lib] [--force]
-cppm sync [--quiet]
+cppm init [<dir>] [--std 20] [--name N] [--lib] [--compiler clang++] [--generator Ninja] [--force]
+cppm sync [--quiet]            aliases: apply, regen
 cppm build [--debug|--release] [--clean] [--jobs N] [--target T] [--verbose]
 cppm list [--long]
 cppm info <dependency>
@@ -60,6 +60,41 @@ cppm clean [--all]
 Flags work before or after positional arguments, so `cppm init MyApp --std 17` does what it looks
 like.
 
+## Changing settings
+
+`cppm.json` is the source of truth. Edit it and run `cppm sync` (also spelled `apply` or `regen`):
+
+```bash
+$ vim cppm.json          # "standard": 17  ->  26
+$ cppm sync
+  C++ standard 17 -> 26
+
+run 'cppm build' to rebuild with these settings
+```
+
+The same applies to the compiler:
+
+```json
+"toolchain": { "cxx": "clang++", "generator": "Ninja" }
+```
+
+CMake refuses to change compiler in an existing build tree, so `cppm build` notices and reconfigures
+from scratch. `cppm doctor` also asks the compiler whether it actually supports the standard you
+asked for, rather than letting CMake fail later with an error that never mentions `cppm.json`.
+
+### Who owns which file
+
+| File | Owner | `sync` may rewrite it |
+|---|---|---|
+| `cppm.json`, `cppm.lock` | you / cppm | — |
+| `.cppm/generated/cppm.cmake` | cppm | yes |
+| `CMakePresets.json` | cppm | yes, if it carries cppm's `vendor` stamp |
+| `CMakeLists.txt` | **you** | never |
+| `CMakeUserPresets.json` | **you** | never |
+
+Because `project()` can only be called from `CMakeLists.txt`, cppm cannot apply a name or version
+change there. `doctor` reports the drift instead of pretending otherwise.
+
 ## Project layout
 
 ```
@@ -67,7 +102,7 @@ MyApp/
 ├── cppm.json          what the project wants          (commit this)
 ├── cppm.lock          what will be fetched             (commit this)
 ├── CMakeLists.txt     yours — cppm never rewrites it   (commit this)
-├── CMakePresets.json  debug and release presets        (commit this)
+├── CMakePresets.json  cppm-generated presets           (commit this)
 ├── src/main.cpp
 ├── include/
 ├── .cppm/             generated files                  (git-ignored)
@@ -81,7 +116,7 @@ exactly four public names, which is a compatibility surface cppm will not change
 
 | Name | Purpose |
 |---|---|
-| `.cppm/generated/cppm_dependencies.cmake` | the include path |
+| `.cppm/generated/cppm.cmake` | the include path |
 | `cppm_link_dependencies(<target> [deps...])` | link entry point |
 | `CPPM_TARGETS_<dep>` | one dependency's targets, for manual wiring |
 | `CPPM_DEPENDENCIES` | all dependency names |

@@ -162,3 +162,48 @@ func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return lines[len(lines)-1]
 }
+
+// StandardSupport reports whether a compiler accepts a given C++ standard.
+//
+// Rather than maintaining a table of which compiler version gained which
+// standard -- which goes stale and is wrong for vendor forks -- this asks the
+// compiler directly by syntax-checking an empty translation unit. The compiler
+// is the authority on its own flags.
+//
+// ok is meaningless when known is false, which happens for compilers that do
+// not take GCC-style flags (notably MSVC).
+func StandardSupport(cxx string, std int) (ok bool, known bool) {
+	path, err := exec.LookPath(cxx)
+	if err != nil {
+		return false, false
+	}
+	if !gnuStyleFlags(path) {
+		return false, false
+	}
+	cmd := exec.Command(path, fmt.Sprintf("-std=c++%d", std), "-fsyntax-only", "-x", "c++", "-")
+	cmd.Stdin = strings.NewReader("")
+	return cmd.Run() == nil, true
+}
+
+// gnuStyleFlags reports whether a compiler takes -std=c++NN, as GCC and Clang
+// do. MSVC uses /std:c++NN and is excluded.
+func gnuStyleFlags(path string) bool {
+	base := strings.ToLower(filepathBase(path))
+	for _, msvc := range []string{"cl.exe", "cl"} {
+		if base == msvc {
+			return false
+		}
+	}
+	// A compiler that rejects -std=c++17 outright is not GCC-style.
+	cmd := exec.Command(path, "-std=c++17", "-fsyntax-only", "-x", "c++", "-")
+	cmd.Stdin = strings.NewReader("")
+	return cmd.Run() == nil
+}
+
+func filepathBase(p string) string {
+	p = strings.ReplaceAll(p, `\`, "/")
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}

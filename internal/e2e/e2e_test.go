@@ -69,7 +69,7 @@ func TestInitThenBuildProducesAnExecutable(t *testing.T) {
 	for _, f := range []string{
 		"cppm.json", "cppm.lock", "CMakeLists.txt", "CMakePresets.json",
 		"src/main.cpp", ".gitignore",
-		".cppm/generated/cppm_dependencies.cmake",
+		".cppm/generated/cppm.cmake",
 	} {
 		if _, err := os.Stat(filepath.Join(proj, f)); err != nil {
 			t.Errorf("init did not create %s", f)
@@ -125,7 +125,7 @@ func TestSyncIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	mustRun(t, dir, "init", "Idem")
 	proj := filepath.Join(dir, "Idem")
-	gen := filepath.Join(proj, ".cppm", "generated", "cppm_dependencies.cmake")
+	gen := filepath.Join(proj, ".cppm", "generated", "cppm.cmake")
 
 	first, err := os.ReadFile(gen)
 	if err != nil {
@@ -319,4 +319,204 @@ func TestBooleanFlagDoesNotConsumeNextArg(t *testing.T) {
 	if !strings.Contains(cml, "add_library(MyLib") {
 		t.Errorf("--lib did not produce a library target:\n%s", cml)
 	}
+}
+
+// The point of putting the standard in the generated include rather than in
+// CMakeLists.txt: editing cppm.json and running sync must reach the build.
+func TestStandardChangeInManifestReachesTheBuild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a real compiler")
+	}
+	requireTool(t, "cmake")
+
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "App", "--std", "17")
+	proj := filepath.Join(dir, "App")
+	mustRun(t, proj, "build")
+
+	if got := compileFlags(t, proj); !strings.Contains(got, "-std=c++17") {
+		t.Fatalf("expected c++17 initially, got: %s", got)
+	}
+
+	// Edit the manifest the way a user would.
+	manifestPath := filepath.Join(proj, "cppm.json")
+	edited := strings.Replace(readFile(t, manifestPath), `"standard": 17`, `"standard": 20`, 1)
+	if err := os.WriteFile(manifestPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := mustRun(t, proj, "sync")
+	if !strings.Contains(out, "17 -> 20") {
+		t.Errorf("sync should report the standard change, got: %s", out)
+	}
+	mustRun(t, proj, "build")
+
+	got := compileFlags(t, proj)
+	if !strings.Contains(got, "-std=c++20") {
+		t.Errorf("the standard change did not reach the build: %s", got)
+	}
+	if strings.Contains(got, "c++17") {
+		t.Error("the old standard is still in use")
+	}
+}
+
+// "apply" and "regen" are aliases, because that is what people reach for.
+func TestSyncAliases(t *testing.T) {
+	for _, alias := range []string{"sync", "apply", "regen"} {
+		t.Run(alias, func(t *testing.T) {
+			dir := t.TempDir()
+			mustRun(t, dir, "init", "A")
+			out := mustRun(t, filepath.Join(dir, "A"), alias)
+			if !strings.Contains(out, "up to date") {
+				t.Errorf("%s did not behave like sync: %s", alias, out)
+			}
+		})
+	}
+}
+
+// The compiler cannot live in the generated include, because CMAKE_CXX_COMPILER
+// must be set before project() runs. It goes into the presets instead.
+func TestCompilerSelectionReachesTheBuild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a real compiler")
+	}
+	requireTool(t, "cmake")
+	requireTool(t, "clang++")
+
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "App", "--compiler", "clang++")
+	proj := filepath.Join(dir, "App")
+
+	if !strings.Contains(readFile(t, filepath.Join(proj, "CMakePresets.json")), "clang++") {
+		t.Error("the compiler should be written into CMakePresets.json")
+	}
+	mustRun(t, proj, "build")
+	if got := compileFlags(t, proj); !strings.Contains(got, "clang") {
+		t.Errorf("clang++ was requested but did not compile the project: %s", got)
+	}
+}
+
+// CMake refuses to change compiler in an existing build tree. cppm detects that
+// and starts the tree afresh, because build output is disposable.
+func TestChangingCompilerRebuildsCleanly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a real compiler")
+	}
+	requireTool(t, "cmake")
+	requireTool(t, "clang++")
+	requireTool(t, "g++")
+
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "App", "--compiler", "g++")
+	proj := filepath.Join(dir, "App")
+	mustRun(t, proj, "build")
+
+	manifestPath := filepath.Join(proj, "cppm.json")
+	edited := strings.Replace(readFile(t, manifestPath), `"cxx": "g++"`, `"cxx": "clang++"`, 1)
+	if err := os.WriteFile(manifestPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, proj, "sync")
+
+	out := mustRun(t, proj, "build")
+	if !strings.Contains(out, "compiler changed") {
+		t.Errorf("expected cppm to notice the compiler change, got: %s", out)
+	}
+	if got := compileFlags(t, proj); !strings.Contains(got, "clang") {
+		t.Errorf("build still uses the old compiler: %s", got)
+	}
+}
+
+// "clang" compiles C++ but does not link the standard library, which produces a
+// wall of undefined references. cppm corrects it rather than letting that happen.
+func TestCDriverIsCorrectedToCxxDriver(t *testing.T) {
+	dir := t.TempDir()
+	out := mustRun(t, dir, "init", "A", "--compiler", "clang")
+	if !strings.Contains(out, "clang++") {
+		t.Errorf("expected clang to be corrected to clang++: %s", out)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, "A", "cppm.json")), `"clang++"`) {
+		t.Error("manifest should record the C++ driver, not the C driver")
+	}
+}
+
+// sync may rewrite presets, so it must not silently discard a hand-written file.
+func TestSyncRefusesToOverwriteForeignPresets(t *testing.T) {
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "A")
+	proj := filepath.Join(dir, "A")
+	presets := filepath.Join(proj, "CMakePresets.json")
+
+	mine := `{"version":3,"configurePresets":[{"name":"mine","binaryDir":"b"}]}`
+	if err := os.WriteFile(presets, []byte(mine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Force a regeneration attempt by changing something presets depend on.
+	manifestPath := filepath.Join(proj, "cppm.json")
+	edited := strings.Replace(readFile(t, manifestPath), `"minimum": "3.24"`, `"minimum": "3.25"`, 1)
+	if err := os.WriteFile(manifestPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := mustRun(t, proj, "sync")
+	if !strings.Contains(out, "no cppm vendor stamp") {
+		t.Errorf("expected sync to report skipping foreign presets, got: %s", out)
+	}
+	if readFile(t, presets) != mine {
+		t.Error("sync overwrote a hand-written CMakePresets.json")
+	}
+}
+
+// doctor should catch an unsupported standard before CMake fails with an error
+// that never mentions cppm.json.
+func TestDoctorDetectsUnsupportedStandard(t *testing.T) {
+	requireTool(t, "cmake")
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "A")
+	proj := filepath.Join(dir, "A")
+
+	manifestPath := filepath.Join(proj, "cppm.json")
+	edited := strings.Replace(readFile(t, manifestPath), `"standard": 20`, `"standard": 26`, 1)
+	if err := os.WriteFile(manifestPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, proj, "sync")
+
+	out, _ := run(t, proj, "doctor")
+	// Either the compiler supports C++26 and this passes, or doctor says so.
+	if strings.Contains(out, "does not support C++26") {
+		return
+	}
+	if !strings.Contains(out, "C++26, supported by") {
+		t.Errorf("doctor said nothing useful about the standard:\n%s", out)
+	}
+}
+
+// doctor must flag a standard set after the include, which would silently
+// override cppm.json and make sync appear to do nothing.
+func TestDoctorDetectsStandardShadowing(t *testing.T) {
+	requireTool(t, "cmake")
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "A")
+	proj := filepath.Join(dir, "A")
+
+	cml := filepath.Join(proj, "CMakeLists.txt")
+	shadowed := readFile(t, cml) + "\nset(CMAKE_CXX_STANDARD 11)\n"
+	if err := os.WriteFile(cml, []byte(shadowed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := run(t, proj, "doctor")
+	if !strings.Contains(out, "after the cppm include") {
+		t.Errorf("doctor did not flag a shadowed standard:\n%s", out)
+	}
+}
+
+// compileFlags returns the debug preset's compile_commands.json.
+func compileFlags(t *testing.T, proj string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(proj, "build", "debug", "compile_commands.json"))
+	if err != nil {
+		t.Skipf("no compile_commands.json: %v", err)
+	}
+	return string(b)
 }

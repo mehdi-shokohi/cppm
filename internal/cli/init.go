@@ -12,15 +12,16 @@ import (
 	"cppm/internal/cmakegen"
 	"cppm/internal/lockfile"
 	"cppm/internal/manifest"
-	"cppm/internal/project"
 	"cppm/internal/toolchain"
 )
 
 type initOpts struct {
-	std   int
-	name  string
-	force bool
-	lib   bool
+	std       int
+	name      string
+	force     bool
+	lib       bool
+	compiler  string
+	generator string
 }
 
 func cmdInit() *Command {
@@ -31,6 +32,8 @@ func cmdInit() *Command {
 		fs.StringVar(&o.name, "name", "", "project name (default: the directory name)")
 		fs.BoolVar(&o.force, "force", false, "overwrite an existing cppm.json")
 		fs.BoolVar(&o.lib, "lib", false, "scaffold a library instead of an executable")
+		fs.StringVar(&o.compiler, "compiler", "", "C++ compiler: clang++, g++, or a path (default: CMake's choice)")
+		fs.StringVar(&o.generator, "generator", "", "CMake generator (default: Ninja when installed)")
 		return fs, o
 	}
 	return &Command{
@@ -127,16 +130,32 @@ func runInit(dir string, o *initOpts) error {
 		return err
 	}
 
-	// Prefer Ninja when it is installed. Presets are committed, so this records
-	// a per-project choice rather than a per-machine one; `cppm doctor` reports
-	// a missing generator.
-	generator := "Ninja"
-	if !toolchain.Ninja().Found() {
-		generator = ""
+	// Compiler and generator are recorded in the manifest and rendered into
+	// CMakePresets.json, because CMAKE_CXX_COMPILER must be set before project()
+	// runs and so cannot come from the generated include.
+	if o.compiler != "" {
+		cxx, changed := manifest.NormalizeCXX(o.compiler)
+		if changed {
+			fmt.Printf("  note: %q compiles C++ but does not link the C++ standard library; using %q\n",
+				o.compiler, cxx)
+		}
+		m.Toolchain.CXX = cxx
+	}
+
+	switch {
+	case o.generator != "":
+		m.Toolchain.Generator = o.generator
+	case toolchain.Ninja().Found():
+		m.Toolchain.Generator = "Ninja"
+	default:
 		fmt.Println("  note: ninja not found; presets will use CMake's default generator")
 	}
 
-	presets, err := cmakegen.Presets(m, generator)
+	if err := m.Validate(); err != nil {
+		return err
+	}
+
+	presets, err := cmakegen.Presets(m)
 	if err != nil {
 		return err
 	}
@@ -156,19 +175,25 @@ func runInit(dir string, o *initOpts) error {
 	owned := []struct{ rel, content string }{
 		{manifest.FileName, string(manifestBytes)},
 		{lockfile.FileName, string(lockBytes)},
-		{filepath.Join(project.DirName, "generated", "cppm_dependencies.cmake"),
-			cmakegen.Dependencies(lock, Version)},
+		{cmakegen.GeneratedRelPath, cmakegen.Managed(m, lock, Version)},
+		{"CMakePresets.json", presets},
 	}
 	// Files the user owns; never clobbered once they exist.
 	userOwned := []struct{ rel, content string }{
 		{"CMakeLists.txt", cmakegen.CMakeLists(m)},
-		{"CMakePresets.json", presets},
 		{mainSource, cmakegen.MainCPP(name)},
 		{".gitignore", cmakegen.GitIgnore()},
 		{filepath.Join("include", ".gitkeep"), ""},
 	}
 
-	fmt.Printf("creating %s project %q (C++%d) in %s\n\n", kindWord(o.lib), name, o.std, root)
+	desc := fmt.Sprintf("C++%d", o.std)
+	if m.Toolchain.CXX != "" {
+		desc += ", " + m.Toolchain.CXX
+	}
+	if m.Toolchain.Generator != "" {
+		desc += ", " + m.Toolchain.Generator
+	}
+	fmt.Printf("creating %s project %q (%s) in %s\n\n", kindWord(o.lib), name, desc, root)
 
 	for _, f := range owned {
 		if err := atomicfile.WriteString(filepath.Join(root, f.rel), f.content); err != nil {

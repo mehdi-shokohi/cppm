@@ -53,6 +53,50 @@ type CMake struct {
 	Minimum string `json:"minimum"`
 }
 
+// Toolchain selects the compiler and generator.
+//
+// These cannot be set from the generated include: CMAKE_CXX_COMPILER must be
+// known before project() runs, and an include placed after project() is too
+// late. They are therefore written into CMakePresets.json as cache variables,
+// which is the supported way to choose a compiler per build tree.
+//
+// All fields are optional; empty means "let CMake decide".
+type Toolchain struct {
+	// CXX is the C++ compiler: a command found on PATH ("clang++", "g++") or an
+	// absolute path.
+	CXX string `json:"cxx,omitempty"`
+	// C is the C compiler. Left empty by default: generated projects declare
+	// LANGUAGES CXX only, so setting it would make CMake warn that it is
+	// unused. Set it explicitly once a dependency brings C sources, and add C
+	// to the project() call in CMakeLists.txt.
+	C string `json:"c,omitempty"`
+	// Generator is the CMake generator, e.g. "Ninja" or "Unix Makefiles".
+	Generator string `json:"generator,omitempty"`
+}
+
+// compilerAliases maps what people type to the driver that actually links a C++
+// program. Invoking "clang" or "gcc" as the C++ compiler compiles but fails to
+// link the C++ standard library, which produces a wall of undefined references.
+var compilerAliases = map[string]string{
+	"clang": "clang++",
+	"gcc":   "g++",
+	"cc":    "c++",
+}
+
+// NormalizeCXX returns the correct C++ driver for a compiler name, and reports
+// whether it had to change anything.
+func NormalizeCXX(name string) (string, bool) {
+	base := name
+	dir := ""
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		dir, base = name[:i+1], name[i+1:]
+	}
+	if fixed, ok := compilerAliases[strings.ToLower(base)]; ok {
+		return dir + fixed, true
+	}
+	return name, false
+}
+
 // Target is a build target cppm scaffolds. v1 generates exactly one.
 type Target struct {
 	Kind         string   `json:"kind"`
@@ -80,6 +124,7 @@ type Manifest struct {
 	Version      string                `json:"version"`
 	CXX          CXX                   `json:"cxx"`
 	CMake        CMake                 `json:"cmake"`
+	Toolchain    Toolchain             `json:"toolchain,omitempty"`
 	Targets      map[string]Target     `json:"targets,omitempty"`
 	Dependencies map[string]Dependency `json:"dependencies"`
 	Overrides    map[string]string     `json:"overrides,omitempty"`
@@ -182,6 +227,23 @@ func (m *Manifest) Validate() error {
 	}
 	if m.CMake.Minimum == "" {
 		return errors.New("cmake.minimum must not be empty")
+	}
+	for field, v := range map[string]string{
+		"toolchain.cxx":       m.Toolchain.CXX,
+		"toolchain.c":         m.Toolchain.C,
+		"toolchain.generator": m.Toolchain.Generator,
+	} {
+		if v == "" {
+			continue
+		}
+		// A value beginning with '-' would be read as a flag by the tools these
+		// are passed to.
+		if strings.HasPrefix(v, "-") {
+			return fmt.Errorf("%s %q must not begin with '-'", field, v)
+		}
+		if strings.ContainsAny(v, "\n\r\"") {
+			return fmt.Errorf("%s %q contains an invalid character", field, v)
+		}
 	}
 	for name, t := range m.Targets {
 		if !nameRe.MatchString(name) {

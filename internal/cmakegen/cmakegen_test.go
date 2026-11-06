@@ -27,7 +27,7 @@ func sampleLock() *lockfile.Lock {
 // cppm promised never to rewrite, so cppm cannot migrate them later. Changing
 // any of these breaks every existing project: that is what this test guards.
 func TestPublicInterfaceIsStable(t *testing.T) {
-	out := Dependencies(sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
 	for _, name := range []string{
 		"function(cppm_link_dependencies",
 		"CPPM_TARGETS_fmt",
@@ -42,7 +42,7 @@ func TestPublicInterfaceIsStable(t *testing.T) {
 // Everything that is not public must be visibly private, so users do not come
 // to depend on it.
 func TestPrivateNamesArePrefixed(t *testing.T) {
-	out := Dependencies(sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "set(") {
@@ -67,7 +67,7 @@ func TestPrivateNamesArePrefixed(t *testing.T) {
 // Emitting them afterwards silently does nothing, and every dependency then
 // builds its own tests and examples.
 func TestOptionsArePlacedBeforeDeclare(t *testing.T) {
-	out := Dependencies(sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
 	optIdx := strings.Index(out, "FMT_TEST")
 	declIdx := strings.Index(out, "FetchContent_Declare(fmt")
 	availIdx := strings.Index(out, "FetchContent_MakeAvailable")
@@ -83,7 +83,7 @@ func TestOptionsArePlacedBeforeDeclare(t *testing.T) {
 }
 
 func TestVersionGatedKeywords(t *testing.T) {
-	out := Dependencies(sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
 	// SYSTEM is 3.25+, EXCLUDE_FROM_ALL is 3.28+, but the generated floor is
 	// 3.24, so both must be behind a version check rather than emitted directly.
 	if !strings.Contains(out, "VERSION_GREATER_EQUAL 3.25") {
@@ -95,22 +95,22 @@ func TestVersionGatedKeywords(t *testing.T) {
 }
 
 func TestDeterministicOutput(t *testing.T) {
-	first := Dependencies(sampleLock(), "test")
+	first := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
 	for i := 0; i < 10; i++ {
-		if again := Dependencies(sampleLock(), "test"); again != first {
+		if again := Managed(manifest.New("MyApp", 20), sampleLock(), "test"); again != first {
 			t.Fatalf("output differs between runs on iteration %d", i)
 		}
 	}
 }
 
 func TestBannerPresent(t *testing.T) {
-	if !strings.Contains(Dependencies(sampleLock(), "test"), "DO NOT EDIT") {
+	if !strings.Contains(Managed(manifest.New("MyApp", 20), sampleLock(), "test"), "DO NOT EDIT") {
 		t.Error("generated file must carry a do-not-edit banner")
 	}
 }
 
 func TestEmptyLockStillProducesUsableFile(t *testing.T) {
-	out := Dependencies(lockfile.New("test"), "test")
+	out := Managed(manifest.New("MyApp", 20), lockfile.New("test"), "test")
 	// A project with no dependencies still includes this file, so the linking
 	// function must exist or every fresh project fails to configure.
 	if !strings.Contains(out, "function(cppm_link_dependencies") {
@@ -133,7 +133,7 @@ func TestQuotingEscapesMetacharacters(t *testing.T) {
 		Commit:  "0000000000000000000000000000000000000000",
 		Options: map[string]string{"X": `a"b${Y}\c`},
 	})
-	out := Dependencies(l, "test")
+	out := Managed(manifest.New("MyApp", 20), l, "test")
 
 	optLine := findLine(t, out, "set(X ")
 	if !strings.Contains(optLine, `\"`) {
@@ -164,20 +164,84 @@ func findLine(t *testing.T, out, substr string) string {
 	return ""
 }
 
-func TestCMakeListsSetsExtensionsOff(t *testing.T) {
-	m := manifest.New("MyApp", 20)
-	out := CMakeLists(m)
+// The standard lives in the generated include, not in CMakeLists.txt, so that
+// editing cppm.json and running sync actually changes the build.
+func TestManagedSetsLanguageSettings(t *testing.T) {
+	m := manifest.New("MyApp", 26)
+	out := Managed(m, lockfile.New("t"), "t")
+	if !strings.Contains(out, "set(CMAKE_CXX_STANDARD 26)") {
+		t.Error("standard must be written into the generated include")
+	}
 	if !strings.Contains(out, "set(CMAKE_CXX_EXTENSIONS OFF)") {
 		t.Error("CMAKE_CXX_EXTENSIONS OFF is required: it defaults to ON and silently selects gnu++NN")
 	}
-	if !strings.Contains(out, "set(CMAKE_CXX_STANDARD 20)") {
-		t.Error("standard not written")
+	// Dependencies must inherit the standard, so it has to be set first.
+	stdIdx := strings.Index(out, "set(CMAKE_CXX_STANDARD")
+	depIdx := strings.Index(out, "FetchContent_Declare")
+	if stdIdx < 0 {
+		t.Fatal("no standard in output")
 	}
-	// The dependency include must precede the targets that link against it.
-	incIdx := strings.Index(out, "cppm_dependencies.cmake")
+	if depIdx >= 0 && stdIdx > depIdx {
+		t.Error("the standard must be set before dependencies are declared")
+	}
+}
+
+func TestCMakeListsDelegatesToGeneratedInclude(t *testing.T) {
+	m := manifest.New("MyApp", 20)
+	out := CMakeLists(m)
+	if strings.Contains(out, "CMAKE_CXX_STANDARD") {
+		t.Error("CMakeLists.txt must not set the standard: it would shadow cppm.json and sync could never change it")
+	}
+	incIdx := strings.Index(out, GeneratedRelPath)
 	tgtIdx := strings.Index(out, "add_executable")
-	if incIdx < 0 || tgtIdx < 0 || incIdx > tgtIdx {
-		t.Error("the dependency include must come before the targets")
+	if incIdx < 0 {
+		t.Fatal("CMakeLists.txt does not include the generated file")
+	}
+	if tgtIdx < 0 || incIdx > tgtIdx {
+		t.Error("the generated include must come before the targets")
+	}
+}
+
+// The compiler cannot come from the generated include, because
+// CMAKE_CXX_COMPILER must be set before project() runs.
+func TestCompilerGoesIntoPresetsNotTheInclude(t *testing.T) {
+	m := manifest.New("MyApp", 20)
+	m.Toolchain.CXX = "clang++"
+	m.Toolchain.C = "clang"
+
+	if strings.Contains(Managed(m, lockfile.New("t"), "t"), "CMAKE_CXX_COMPILER") {
+		t.Error("the compiler must not be set in the generated include; it runs after project()")
+	}
+	out, err := Presets(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"CMAKE_CXX_COMPILER", "clang++", "CMAKE_C_COMPILER", "clang"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("presets missing %s", want)
+		}
+	}
+}
+
+// sync may rewrite presets, so it must be able to tell its own output from a
+// hand-written file.
+func TestPresetsVendorStampRoundTrips(t *testing.T) {
+	m := manifest.New("MyApp", 20)
+	out, err := Presets(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !PresetsAreCppmGenerated([]byte(out)) {
+		t.Error("cppm-generated presets must carry the vendor stamp")
+	}
+	for _, foreign := range []string{
+		`{"version":3,"configurePresets":[]}`,
+		`{"version":3,"vendor":{"someoneelse":{}},"configurePresets":[]}`,
+		`not json at all`,
+	} {
+		if PresetsAreCppmGenerated([]byte(foreign)) {
+			t.Errorf("a file without the stamp must not be claimed as cppm-generated: %s", foreign)
+		}
 	}
 }
 
@@ -191,7 +255,8 @@ func TestCMakeListsLibraryKind(t *testing.T) {
 
 func TestPresetsAreValidJSON(t *testing.T) {
 	m := manifest.New("MyApp", 20)
-	out, err := Presets(m, "Ninja")
+	m.Toolchain.Generator = "Ninja"
+	out, err := Presets(m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +275,7 @@ func TestPathDependencyUsesAddSubdirectory(t *testing.T) {
 		Path:    "../MyLib",
 		Targets: []string{"MyLib"},
 	})
-	out := Dependencies(l, "test")
+	out := Managed(manifest.New("MyApp", 20), l, "test")
 	if !strings.Contains(out, "add_subdirectory") {
 		t.Error("path dependencies should use add_subdirectory, not FetchContent")
 	}

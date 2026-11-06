@@ -60,10 +60,19 @@ What survives is the part that is genuinely hard to change later: §1's file-own
 ## 1. Design rules
 
 1. **cppm never owns the build.** It generates CMake and shells out. CMake and Ninja do the work.
-2. **Generated and hand-written files never mix.** Everything cppm writes lives under
-   `.cppm/generated/` and carries a "do not edit" banner. `CMakeLists.txt` is the user's file after
-   `init` and is never rewritten.
-2b. **Prefer ASK over a confident guess.** When inference is not confident, say so and name the
+2. **Generated and hand-written files never mix.** `CMakeLists.txt` is the user's file after `init`
+   and is never rewritten. cppm owns `.cppm/generated/cppm.cmake` and `CMakePresets.json`.
+2a. **A manifest setting must be one cppm can actually apply.** A setting that lives in a
+   user-owned file can never be changed by `sync`, which makes the manifest field decorative. So
+   each setting lives wherever cppm can own it:
+
+   | Setting | Where it goes | Why |
+   |---|---|---|
+   | `cxx.standard`, `required`, `extensions` | generated `cppm.cmake` | an include after `project()` can still set these |
+   | `toolchain.cxx`, `.c`, `.generator` | `CMakePresets.json` | `CMAKE_CXX_COMPILER` must be set *before* `project()`, so an include is too late |
+   | dependencies | generated `cppm.cmake` | must precede the targets that link them |
+   | `project()` name and version, targets, sources | `CMakeLists.txt` | `project()` can only be called there, so cppm cannot apply changes — `doctor` detects the drift instead |
+2c. **Prefer ASK over a confident guess.** When inference is not confident, say so and name the
    exact line to edit. A wrong link target that configures successfully is the worst outcome the
    tool can produce; "I don't know, add this one line" is an acceptable one.
 3. **The lockfile is the source of truth for builds.** The manifest states intent; the lock states

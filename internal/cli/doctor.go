@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"cppm/internal/cmakegen"
 	"cppm/internal/manifest"
 	"cppm/internal/project"
 	"cppm/internal/toolchain"
@@ -107,6 +108,106 @@ func toolchainChecks() []check {
 	return out
 }
 
+// toolchainRequestChecks validates the compiler and generator the project asks
+// for, as opposed to what happens to be installed.
+func toolchainRequestChecks(p *project.Project) []check {
+	var out []check
+	tc := p.Manifest.Toolchain
+
+	if tc.CXX == "" {
+		out = append(out, check{"toolchain.cxx", statusOK, "not set; CMake picks the compiler", ""})
+	} else if found := toolchain.Find(tc.CXX); found.Found() {
+		out = append(out, check{"toolchain.cxx", statusOK,
+			fmt.Sprintf("%s %s at %s", tc.CXX, found.Version, found.Path), ""})
+	} else {
+		out = append(out, check{"toolchain.cxx", statusFail,
+			fmt.Sprintf("%q is requested in cppm.json but not found", tc.CXX),
+			"install it, or change \"toolchain\".\"cxx\" and run 'cppm sync'"})
+	}
+
+	// Invoking "clang" or "gcc" as the C++ compiler compiles but fails to link
+	// the standard library, which surfaces as a wall of undefined references.
+	if tc.CXX != "" {
+		if fixed, changed := manifest.NormalizeCXX(tc.CXX); changed {
+			out = append(out, check{"toolchain.cxx", statusWarn,
+				fmt.Sprintf("%q is a C driver, not a C++ driver", tc.CXX),
+				fmt.Sprintf("it will not link the C++ standard library; use %q instead", fixed)})
+		}
+	}
+
+	// Ask the compiler whether it supports the requested standard, rather than
+	// letting CMake fail at generate time with an error that never mentions
+	// cppm.json.
+	cxx := tc.CXX
+	if cxx == "" {
+		cxx = toolchain.Compiler().Name
+	}
+	if cxx != "" {
+		if supported, known := toolchain.StandardSupport(cxx, p.Manifest.CXX.Standard); known && !supported {
+			out = append(out, check{"cxx standard", statusFail,
+				fmt.Sprintf("%s does not support C++%d", cxx, p.Manifest.CXX.Standard),
+				fmt.Sprintf("lower \"cxx\".\"standard\" in cppm.json and run 'cppm sync', or install a newer %s", cxx)})
+		} else if known {
+			out = append(out, check{"cxx standard", statusOK,
+				fmt.Sprintf("C++%d, supported by %s", p.Manifest.CXX.Standard, cxx), ""})
+		}
+	}
+
+	if tc.Generator != "" {
+		if tc.Generator == "Ninja" && !toolchain.Ninja().Found() {
+			out = append(out, check{"toolchain.generator", statusFail,
+				"Ninja is requested in cppm.json but not installed",
+				"install ninja, or change \"toolchain\".\"generator\" and run 'cppm sync'"})
+		} else {
+			out = append(out, check{"toolchain.generator", statusOK, tc.Generator, ""})
+		}
+	}
+	return out
+}
+
+// driftChecks reports settings that cppm cannot apply by regenerating, because
+// they live in the user-owned CMakeLists.txt. project() has to be called there,
+// so cppm can only detect the mismatch and say so.
+func driftChecks(p *project.Project) []check {
+	b, err := os.ReadFile(p.CMakeListsPath())
+	if err != nil {
+		return nil
+	}
+	content := string(b)
+	var out []check
+
+	if name := cmakeProjectName(content); name != "" && name != p.Manifest.Name {
+		out = append(out, check{"project name", statusWarn,
+			fmt.Sprintf("cppm.json says %q, CMakeLists.txt says %q", p.Manifest.Name, name),
+			"project() must be called in CMakeLists.txt, so cppm cannot change it; edit it there"})
+	}
+
+	// A standard set in CMakeLists.txt after the include would silently override
+	// cppm.json, making 'cppm sync' appear to do nothing.
+	if idx := strings.Index(content, "CMAKE_CXX_STANDARD"); idx >= 0 {
+		incIdx := strings.Index(content, cmakegen.GeneratedRelPath)
+		if incIdx >= 0 && idx > incIdx {
+			out = append(out, check{"cxx standard", statusWarn,
+				"CMakeLists.txt sets CMAKE_CXX_STANDARD after the cppm include",
+				"that overrides cppm.json, so 'cppm sync' will not change the standard; remove it to let cppm.json win"})
+		}
+	}
+	return out
+}
+
+// cmakeProjectName extracts the first argument of project().
+func cmakeProjectName(content string) string {
+	idx := strings.Index(content, "project(")
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx+len("project("):]
+	if end := strings.IndexAny(rest, " \t\r\n)"); end >= 0 {
+		return strings.TrimSpace(rest[:end])
+	}
+	return ""
+}
+
 func projectChecks() []check {
 	p, err := project.Open(mustCwd())
 	if err != nil {
@@ -134,10 +235,10 @@ func projectChecks() []check {
 			fmt.Sprintf("%d dependency(ies) resolved", len(p.Lock.Packages)), ""})
 	}
 
-	if _, err := os.Stat(p.DepsCMakePath()); err != nil {
+	if _, err := os.Stat(p.ManagedCMakePath()); err != nil {
 		out = append(out, check{"generated cmake", statusFail, "missing", "run 'cppm sync'"})
 	} else {
-		out = append(out, check{"generated cmake", statusOK, relTo(p.Root, p.DepsCMakePath()), ""})
+		out = append(out, check{"generated cmake", statusOK, relTo(p.Root, p.ManagedCMakePath()), ""})
 	}
 
 	// CMAKE_CXX_EXTENSIONS defaults to ON in CMake, which silently compiles the
@@ -155,11 +256,18 @@ func projectChecks() []check {
 		out = append(out, check{"CMakeLists.txt", statusFail, "missing", "run 'cppm init --force' to regenerate project files"})
 	}
 
-	if _, err := os.Stat(p.PresetsPath()); err != nil {
+	if pb, err := os.ReadFile(p.PresetsPath()); err != nil {
 		out = append(out, check{"presets", statusWarn, "CMakePresets.json missing",
-			"'cppm build' needs it; run 'cppm init --force'"})
+			"'cppm build' needs it; run 'cppm sync' to regenerate"})
+	} else if !cmakegen.PresetsAreCppmGenerated(pb) {
+		out = append(out, check{"presets", statusWarn,
+			"CMakePresets.json has no cppm vendor stamp",
+			"cppm will not overwrite it, so toolchain changes in cppm.json will not reach the build"})
 	} else {
-		out = append(out, check{"presets", statusOK, "CMakePresets.json", ""})
+		out = append(out, check{"presets", statusOK, "CMakePresets.json (cppm-generated)", ""})
 	}
+
+	out = append(out, toolchainRequestChecks(p)...)
+	out = append(out, driftChecks(p)...)
 	return out
 }

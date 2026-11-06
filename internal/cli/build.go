@@ -4,8 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"cppm/internal/project"
 	"cppm/internal/toolchain"
@@ -82,11 +84,27 @@ func runBuild(o *buildOpts) error {
 		return fmt.Errorf("CMakePresets.json is missing from %s; was this project created by cppm init?", p.Root)
 	}
 
-	if _, err := Sync(p); err != nil {
+	changes, err := Sync(p)
+	if err != nil {
 		return err
+	}
+	for _, c := range changes {
+		fmt.Printf("  %s\n", c)
 	}
 
 	buildDir := p.BuildDir(preset)
+
+	// CMake stores the compiler in CMakeCache.txt and refuses to configure if it
+	// changes, with an error that does not explain what to do. Since cppm.json
+	// is the source of truth, detect the mismatch and start the build tree
+	// afresh -- build output is disposable and git-ignored.
+	if stale, why := staleToolchain(p, buildDir); stale {
+		fmt.Printf("  %s; reconfiguring from scratch\n", why)
+		if err := os.RemoveAll(buildDir); err != nil {
+			return fmt.Errorf("remove %s: %w", buildDir, err)
+		}
+	}
+
 	if o.clean {
 		fmt.Printf("removing %s\n", relTo(p.Root, buildDir))
 		if err := os.RemoveAll(buildDir); err != nil {
@@ -116,6 +134,63 @@ func runBuild(o *buildOpts) error {
 
 	fmt.Printf("\nbuilt %s -> %s\n", p.Manifest.Name, relTo(p.Root, buildDir))
 	return nil
+}
+
+// staleToolchain reports whether an existing build tree was configured with a
+// different compiler or generator than cppm.json now asks for.
+func staleToolchain(p *project.Project, buildDir string) (bool, string) {
+	cachePath := filepath.Join(buildDir, "CMakeCache.txt")
+	b, err := os.ReadFile(cachePath)
+	if err != nil {
+		return false, "" // no build tree yet, nothing to invalidate
+	}
+	cache := string(b)
+
+	if want := p.Manifest.Toolchain.CXX; want != "" {
+		if got := cacheValue(cache, "CMAKE_CXX_COMPILER"); got != "" && !sameProgram(got, want) {
+			return true, fmt.Sprintf("compiler changed to %s (build tree used %s)", want, got)
+		}
+	}
+	if want := p.Manifest.Toolchain.Generator; want != "" {
+		if got := cacheValue(cache, "CMAKE_GENERATOR"); got != "" && got != want {
+			return true, fmt.Sprintf("generator changed to %s (build tree used %s)", want, got)
+		}
+	}
+	return false, ""
+}
+
+// cacheValue reads a CMakeCache.txt entry, whose lines look like
+// NAME:TYPE=value.
+func cacheValue(cache, name string) string {
+	for _, line := range strings.Split(cache, "\n") {
+		if !strings.HasPrefix(line, name+":") {
+			continue
+		}
+		if i := strings.Index(line, "="); i >= 0 {
+			return strings.TrimSpace(line[i+1:])
+		}
+	}
+	return ""
+}
+
+// sameProgram compares a cached absolute compiler path with what the manifest
+// asks for, which may be a bare command name resolved through PATH.
+func sameProgram(cached, wanted string) bool {
+	if cached == wanted {
+		return true
+	}
+	if resolved, err := exec.LookPath(wanted); err == nil {
+		if resolved == cached {
+			return true
+		}
+		// Follow symlinks, so /usr/bin/c++ -> g++ does not look like a change.
+		if a, err1 := filepath.EvalSymlinks(resolved); err1 == nil {
+			if bPath, err2 := filepath.EvalSymlinks(cached); err2 == nil && a == bPath {
+				return true
+			}
+		}
+	}
+	return filepath.Base(cached) == filepath.Base(wanted)
 }
 
 // relTo renders path relative to base when that is shorter and clearer.

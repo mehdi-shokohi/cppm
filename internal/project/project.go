@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"cppm/internal/cmakegen"
 	"cppm/internal/lockfile"
 	"cppm/internal/manifest"
 )
@@ -86,9 +87,10 @@ func (p *Project) GeneratedDir() string {
 	return filepath.Join(p.Root, DirName, "generated")
 }
 
-// DepsCMakePath is the generated dependency include.
-func (p *Project) DepsCMakePath() string {
-	return filepath.Join(p.GeneratedDir(), "cppm_dependencies.cmake")
+// ManagedCMakePath is the single cppm-owned CMake include: language settings
+// plus dependencies.
+func (p *Project) ManagedCMakePath() string {
+	return filepath.Join(p.Root, filepath.FromSlash(cmakegen.GeneratedRelPath))
 }
 
 // CMakeListsPath is the user-owned CMakeLists.txt. cppm writes it at init and

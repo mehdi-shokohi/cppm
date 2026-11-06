@@ -3,10 +3,14 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	"cppm/internal/atomicfile"
 	"cppm/internal/cmakegen"
 	"cppm/internal/lockfile"
+	"cppm/internal/manifest"
 	"cppm/internal/project"
 )
 
@@ -19,9 +23,24 @@ func cmdSync() *Command {
 	}
 	return &Command{
 		Name:    "sync",
-		Summary: "regenerate the CMake files from cppm.json and cppm.lock",
+		Aliases: []string{"apply", "regen"},
+		Summary: "apply cppm.json to the CMake files",
 		Usage:   "cppm sync [flags]",
-		Long: `Brings .cppm/generated up to date with the manifest and lockfile.
+		Long: `Applies the manifest to the generated CMake, then reports what changed.
+
+Run this after editing cppm.json by hand. Changing "cxx".standard to 26 and
+running sync propagates it to the build; so does changing "toolchain".cxx to
+clang++, or adding a dependency option.
+
+Aliases: apply, regen.
+
+What sync owns and may rewrite:
+    .cppm/generated/cppm.cmake   language settings and dependencies
+    CMakePresets.json            compiler, generator, build types
+
+What sync never touches:
+    CMakeLists.txt               yours, including your project() and targets
+    CMakeUserPresets.json        yours, for presets of your own
 
 sync never changes a pin. If the lockfile already resolves a dependency, that
 resolution is obeyed exactly; sync only fills gaps and rewrites generated CMake.
@@ -42,43 +61,124 @@ sync is idempotent: running it twice produces byte-identical output.`,
 			if err != nil {
 				return err
 			}
-			changed, err := Sync(p)
+			changes, err := Sync(p)
 			if err != nil {
 				return err
 			}
-			if !*quiet {
-				n := len(p.Manifest.Dependencies)
-				if changed {
-					fmt.Printf("synced %d dependency(ies); regenerated %s\n", n, relTo(p.Root, p.DepsCMakePath()))
-				} else {
-					fmt.Printf("already up to date (%d dependency(ies))\n", n)
-				}
+			if *quiet {
+				return nil
 			}
+			if len(changes) == 0 {
+				fmt.Printf("already up to date (C++%d, %d dependency(ies))\n",
+					p.Manifest.CXX.Standard, len(p.Manifest.Dependencies))
+				return nil
+			}
+			for _, c := range changes {
+				fmt.Printf("  %s\n", c)
+			}
+			fmt.Println("\nrun 'cppm build' to rebuild with these settings")
 			return nil
 		},
 	}
 }
 
-// Sync regenerates the managed CMake file and reports whether anything changed.
+// Sync regenerates the cppm-owned CMake files and reports what changed.
 //
-// Exported because `build` runs it first, so that building a freshly cloned
-// project works without a separate sync step.
-func Sync(p *project.Project) (bool, error) {
+// Exported because `build` runs it first, so building a freshly cloned project
+// works without a separate sync step.
+func Sync(p *project.Project) ([]string, error) {
 	if err := reconcile(p); err != nil {
-		return false, err
+		return nil, err
 	}
-	content := cmakegen.Dependencies(p.Lock, Version)
-	path := p.DepsCMakePath()
+	var changes []string
 
-	if same, err := fileHasContent(path, content); err != nil {
-		return false, err
-	} else if same {
-		return false, nil
+	// --- the generated include ---
+	managed := cmakegen.Managed(p.Manifest, p.Lock, Version)
+	previous, _ := os.ReadFile(p.ManagedCMakePath())
+	same, err := fileHasContent(p.ManagedCMakePath(), managed)
+	if err != nil {
+		return nil, err
 	}
-	if err := atomicfile.WriteString(path, content); err != nil {
-		return false, err
+	if !same {
+		if err := atomicfile.WriteString(p.ManagedCMakePath(), managed); err != nil {
+			return nil, err
+		}
+		changes = append(changes, describeManagedChange(string(previous), managed, p.Manifest))
 	}
-	return true, nil
+
+	// --- presets ---
+	presets, err := cmakegen.Presets(p.Manifest)
+	if err != nil {
+		return nil, err
+	}
+	existing, readErr := os.ReadFile(p.PresetsPath())
+	switch {
+	case os.IsNotExist(readErr):
+		if err := atomicfile.WriteString(p.PresetsPath(), presets); err != nil {
+			return nil, err
+		}
+		changes = append(changes, "created CMakePresets.json")
+	case readErr != nil:
+		return nil, readErr
+	case string(existing) == presets:
+		// up to date
+	case !cmakegen.PresetsAreCppmGenerated(existing):
+		// Somebody wrote this by hand. Overwriting it silently would lose their
+		// work, so report instead and let them decide.
+		changes = append(changes,
+			"skipped CMakePresets.json: no cppm vendor stamp, so cppm did not generate it.\n"+
+				"           delete it and run sync again to regenerate, or keep it and set the compiler there yourself")
+	default:
+		if err := atomicfile.WriteString(p.PresetsPath(), presets); err != nil {
+			return nil, err
+		}
+		changes = append(changes, describePresetChange(p.Manifest))
+	}
+	return changes, nil
+}
+
+// describeManagedChange names the user-visible effect of a regeneration rather
+// than just reporting that bytes moved.
+func describeManagedChange(before, after string, m *manifest.Manifest) string {
+	oldStd := cmakeIntSetting(before, "CMAKE_CXX_STANDARD")
+	if before != "" && oldStd != 0 && oldStd != m.CXX.Standard {
+		return fmt.Sprintf("C++ standard %d -> %d", oldStd, m.CXX.Standard)
+	}
+	if before == "" {
+		return fmt.Sprintf("generated %s", cmakegen.GeneratedRelPath)
+	}
+	return fmt.Sprintf("regenerated %s (C++%d, %d dependency(ies))",
+		cmakegen.GeneratedRelPath, m.CXX.Standard, len(m.Dependencies))
+}
+
+func describePresetChange(m *manifest.Manifest) string {
+	parts := []string{"updated CMakePresets.json"}
+	if m.Toolchain.CXX != "" {
+		parts = append(parts, "compiler "+m.Toolchain.CXX)
+	}
+	if m.Toolchain.Generator != "" {
+		parts = append(parts, "generator "+m.Toolchain.Generator)
+	}
+	return strings.Join(parts, " -- ")
+}
+
+// cmakeIntSetting extracts set(<NAME> <int>) from generated CMake, for change
+// reporting only.
+func cmakeIntSetting(content, name string) int {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		prefix := "set(" + name + " "
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		v := strings.TrimSuffix(strings.TrimPrefix(line, prefix), ")")
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
 
 // reconcile drops locked packages the manifest no longer declares, and reports
