@@ -1,0 +1,9 @@
+# cppm generated + build output
+.cppm/
+build/
+# Go
+/cppm
+/bin/
+*.test
+# Phase 0 scratch
+/tools/phase0/_work/
