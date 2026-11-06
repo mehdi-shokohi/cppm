@@ -398,6 +398,104 @@ See [architecture.md](architecture.md) for the revised schemas, package layout a
 
 ---
 
+## 6b. Remaining risk register
+
+What Phase 0 and the spikes have **retired**: target discovery (§2.1–2.7), per-dependency option
+injection (verified — suppressing `BUILD_TESTING` and `SPDLOG_BUILD_EXAMPLE` produced a clean
+13-step build with no test or example targets), commit pinning with shallow fallback (§2.3), and
+alias probing (§2.1).
+
+What remains, ranked by risk rather than by order of work.
+
+### A1. The lockfile does not cover transitive dependencies — *highest remaining risk*
+
+cppm pins what **cppm** fetches. When spdlog internally resolves its own fmt — via its bundled copy,
+its own `FetchContent`, or `find_package` — cppm neither pins it nor records it. So `cppm.lock` is an
+*incomplete* record of the build, which partly undermines the reproducibility claim that is one of
+the project's two differentiators (§5).
+
+The fix is the CMake 3.24 dependency provider (§3.3): the provider intercepts every nested
+`find_package()` and `FetchContent_MakeAvailable()`, lets cppm resolve and pin it, and records it in
+the lock. That turns the lock into a complete record *and* delivers conflict detection as a
+by-product, since the provider sees every version request.
+
+**Unspiked.** This is the highest-value remaining piece of engineering and the one most likely to
+hold surprises. It should be proven before Phase 3 is scoped.
+
+### A2. `add_subdirectory` makes dependency code part of your build
+
+FetchContent's model is not isolation — it is inclusion. Dependencies can therefore:
+
+- set cache variables that affect you (`BUILD_SHARED_LIBS`, `CMAKE_CXX_STANDARD`,
+  `CMAKE_POSITION_INDEPENDENT_CODE`);
+- mutate `CMAKE_CXX_FLAGS` or call `add_compile_options()` at directory scope;
+- **collide on target names** — two dependencies each defining `uninstall`, `docs` or `benchmark`
+  is a hard configure error with no clean workaround;
+- register `install()` rules that pollute your install tree.
+
+`SYSTEM` and `EXCLUDE_FROM_ALL` mitigate some of this but need CMake 3.25/3.28 (§C1), and neither
+prevents name collisions. Partially unavoidable; needs a spike to find where the real walls are and
+what `cppm doctor` should warn about.
+
+### A3. MSVC runtime library mismatch
+
+The classic Windows failure: dependencies built `/MD` linked against a `/MT` consumer, producing
+link errors that look unrelated to their cause. Needs `CMAKE_MSVC_RUNTIME_LIBRARY` propagated
+consistently to every dependency. **Entirely untested** — every measurement in this document is
+Linux/GCC/Clang.
+
+### B1. Version constraints without a registry
+
+There is no index to query, so "what versions exist" means `git ls-remote --tags` plus
+normalisation — and C++ tags are not semver:
+
+```
+fmt         11.1.4          spdlog   v1.15.3
+SDL         release-2.30.9  abseil   20240722.0     (a date)
+```
+
+Strict semver comparison breaks on at least two of those. Needed: a tolerant normaliser, a
+documented policy for what bare `cppm add fmt` resolves to (newest tag? default branch?), and
+matching semantics for `cppm update`. Design work more than hard code, but easy to get wrong in a
+way that is painful to change later.
+
+### B2. Conflict resolution UX
+
+Detection becomes feasible via A1's provider, but it is configure-time and after the fact. The open
+question is what happens *next*: how an `overrides` entry is surfaced, suggested and applied without
+requiring the user to understand FetchContent's first-declaration-wins rule.
+
+### B3. How much build-system modelling to absorb — *main scope risk*
+
+The manifest's `targets` section is the top of a slope: sources today, then globs, per-target
+include directories, compile definitions, test registration — at which point cppm has become a
+build-system DSL and competes with cmkr, contradicting §0.
+
+A defensible line: cppm models **just enough to scaffold and link** — target kind, sources,
+dependency sets — and anything beyond that is the user's `CMakeLists.txt`. Worth writing down
+before `init` is implemented, because the template is what sets the expectation.
+
+### C1. The generator must target a range of CMake versions
+
+Found while reviewing this document: `EXCLUDE_FROM_ALL` on `FetchContent_Declare` requires **3.28**
+and `SYSTEM` requires **3.25**, while §3.3 recommends a **3.24** floor for dependency providers. The
+generated file must therefore feature-detect rather than assume, and cppm needs a small compatibility
+matrix of which keywords it may emit at which floor. Mechanical, but a real source of "works on my
+machine" bugs.
+
+### C2. Cross-platform specifics
+
+Windows `MAX_PATH` limits against deep `_deps/<name>-subbuild` paths, case-insensitive filesystems,
+generator differences, and shell quoting. Tedious rather than conceptually hard, but it is where the
+bug reports will come from.
+
+### C3. Local path dependencies
+
+Circular-dependency detection, whether a local dependency that is *itself* a cppm project gets its
+manifest read recursively, and what locking means for something editable by design.
+
+---
+
 ## 7. Decisions taken
 
 1. **Implementation language: Go** (§4). Replaces the proposal's C++20.

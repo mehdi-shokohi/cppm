@@ -269,16 +269,27 @@ inferred.
 include_guard(GLOBAL)
 include(FetchContent)
 
+# Feature detection — the generator must target a RANGE of CMake versions.
+set(CPPM_FC_KEYWORDS "")
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.25)
+  list(APPEND CPPM_FC_KEYWORDS SYSTEM)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+  list(APPEND CPPM_FC_KEYWORDS EXCLUDE_FROM_ALL)
+endif()
+
 set(CPPM_DEPENDENCIES "")
 
 # ---- fmt @ 11.1.4 ----
 set(FMT_TEST OFF CACHE BOOL "" FORCE)
 set(FMT_DOC  OFF CACHE BOOL "" FORCE)
+# Keyword availability differs by CMake version, so the generator emits what the
+# project's floor supports:  SYSTEM is 3.25+, EXCLUDE_FROM_ALL is 3.28+.
 FetchContent_Declare(fmt
   GIT_REPOSITORY "https://github.com/fmtlib/fmt.git"
   GIT_TAG        123913715afeb8a437e6388b4473fcc4753e1c9a
   GIT_SHALLOW    ON
-  EXCLUDE_FROM_ALL
+  ${CPPM_FC_KEYWORDS}   # expands to "SYSTEM EXCLUDE_FROM_ALL" where supported
 )
 set(CPPM_TARGETS_fmt "fmt::fmt")
 list(APPEND CPPM_DEPENDENCIES fmt)
