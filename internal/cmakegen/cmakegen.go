@@ -52,7 +52,18 @@ func CMakeLists(m *manifest.Manifest) string {
 	b.WriteString("# dependency list. This include must come before your targets.\n")
 	fmt.Fprintf(&b, "include(\"${CMAKE_CURRENT_SOURCE_DIR}/%s\")\n\n", GeneratedRelPath)
 
+	// Non-test targets first. A test target may link the library it tests, and
+	// target_link_libraries() silently treats a name that is not yet a target
+	// as a plain -l flag, which fails at link time with no mention of CMake.
+	var ordered []string
 	for _, name := range m.TargetNames() {
+		if !m.Targets[name].Test {
+			ordered = append(ordered, name)
+		}
+	}
+	ordered = append(ordered, m.TestTargetNames()...)
+
+	for _, name := range ordered {
 		t := m.Targets[name]
 		switch t.Kind {
 		case manifest.KindLibrary:
@@ -75,8 +86,100 @@ func CMakeLists(m *manifest.Manifest) string {
 		} else {
 			fmt.Fprintf(&b, "cppm_link_dependencies(%s)\n", name)
 		}
+
+		if t.Test {
+			if lib := soleLibrary(m); lib != "" {
+				b.WriteString("\n# The library under test. cppm_link_dependencies above covers the\n")
+				b.WriteString("# dependencies from cppm.json; your own targets are yours to link.\n")
+				fmt.Fprintf(&b, "target_link_libraries(%s PRIVATE %s)\n", name, lib)
+			} else {
+				b.WriteString("\n# To test code from another target, link it here, e.g.\n")
+				b.WriteString("#     target_link_libraries(" + name + " PRIVATE MyLibrary)\n")
+				b.WriteString("# An executable cannot be linked, so shared code belongs in a library.\n")
+			}
+			b.WriteString("\n# Registers the target with CTest, which is what 'cppm test' drives.\n")
+			b.WriteString("# The NAME is what 'cppm test --filter' matches against.\n")
+			fmt.Fprintf(&b, "add_test(NAME %s COMMAND %s)\n", name, name)
+		}
+		b.WriteString("\n")
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// soleLibrary returns the project's only non-test library target, or "" when
+// there is none or more than one.
+//
+// Deliberately not a best guess: with two libraries cppm cannot know which one
+// the tests are for, and a wrongly linked scaffold is worse than a comment
+// telling the user what to write.
+func soleLibrary(m *manifest.Manifest) string {
+	found := ""
+	for _, name := range m.TargetNames() {
+		t := m.Targets[name]
+		if t.Test || t.Kind != manifest.KindLibrary {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = name
+	}
+	return found
+}
+
+// TestMainCPP renders the first test for `cppm init --with-tests`.
+//
+// It uses no framework on purpose: init must work offline and before any
+// dependency exists, so the scaffolded suite has to compile and run with
+// nothing but the standard library. Swapping in Catch2 is a later, explicit
+// step, and the file says how.
+func TestMainCPP(projectName string) string {
+	return fmt.Sprintf(`// Tests for %s.
+//
+// A deliberately tiny harness: no dependencies, so 'cppm test' works the moment
+// the project is created. CTest judges a test purely by its exit status, so
+// returning non-zero on failure is the whole protocol.
+//
+// To use a real framework instead:
+//
+//     cppm add github:catchorg/Catch2@v3.7.1 --dev
+//
+// then rewrite this file against it. A --dev dependency is linked into every
+// target marked "test": true in cppm.json, so no CMakeLists.txt edit is needed.
+
+#include <cstdio>
+#include <string>
+
+namespace {
+
+int failures = 0;
+
+void check(bool ok, const char* expression, const char* file, int line)
+{
+    if (ok) {
+        return;
+    }
+    std::fprintf(stderr, "%%s:%%d: FAILED: %%s\n", file, line, expression);
+    ++failures;
+}
+
+} // namespace
+
+#define CHECK(expression) check((expression), #expression, __FILE__, __LINE__)
+
+int main()
+{
+    CHECK(1 + 1 == 2);
+    CHECK(std::string("%s").empty() == false);
+
+    if (failures > 0) {
+        std::fprintf(stderr, "%%d check(s) failed\n", failures);
+        return 1;
+    }
+    std::printf("all checks passed\n");
+    return 0;
+}
+`, projectName, projectName)
 }
 
 // MainCPP renders a hello-world that proves the toolchain works end to end.
@@ -158,16 +261,52 @@ func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string) string 
 	b.WriteString("    list(APPEND _cppm_fc_keywords EXCLUDE_FROM_ALL)\n")
 	b.WriteString("endif()\n\n")
 
-	b.WriteString("set(CPPM_DEPENDENCIES \"\")\n\n")
+	// ---- dependency classification ----
+	b.WriteString("# CPPM_DEPENDENCIES holds the dependencies that ship. It is what\n")
+	b.WriteString("# cppm_link_dependencies() links when called with no dependency list.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Dependencies marked \"dev\": true in cppm.json are deliberately absent from\n")
+	b.WriteString("# it, so a test framework cannot end up in a release binary. They are\n")
+	b.WriteString("# tracked separately and linked only into targets marked \"test\": true.\n")
+	b.WriteString("set(CPPM_DEPENDENCIES \"\")\n")
+	b.WriteString("set(_cppm_dev_dependencies \"\")\n")
+	b.WriteString("set(_cppm_all_dependencies \"\")\n\n")
+
+	if len(m.TestTargetNames()) > 0 {
+		b.WriteString("# Targets declared \"test\": true in cppm.json. cppm_link_dependencies() adds\n")
+		b.WriteString("# the dev dependencies to these, which is what lets 'cppm add --dev' take\n")
+		b.WriteString("# effect without an edit to CMakeLists.txt -- a file cppm never rewrites.\n")
+		fmt.Fprintf(&b, "set(_cppm_test_targets %s)\n\n", strings.Join(m.TestTargetNames(), " "))
+	} else {
+		b.WriteString("set(_cppm_test_targets \"\")\n\n")
+	}
+
+	// Dependencies gate their own test suites on BUILD_TESTING, and the
+	// include(CTest) at the end of this file defaults it to ON. A plain
+	// (non-cache) variable set to OFF here makes their option(BUILD_TESTING ...)
+	// calls no-ops under CMP0077 and their if(BUILD_TESTING) blocks false, so
+	// enabling tests for this project does not also build every dependency's.
+	// Restored after MakeAvailable, because the user's own tests need it.
+	if len(l.Packages) > 0 {
+		b.WriteString("# See the Testing section at the end of this file for why this is here.\n")
+		b.WriteString("if(DEFINED BUILD_TESTING)\n")
+		b.WriteString("    set(_cppm_saved_build_testing \"${BUILD_TESTING}\")\n")
+		b.WriteString("endif()\n")
+		b.WriteString("set(BUILD_TESTING OFF)\n\n")
+	}
 
 	var fetchNames []string
 
 	for _, p := range l.Packages {
 		fmt.Fprintf(&b, "# ---------------------------------------------------------------------------\n")
+		devMark := ""
+		if p.Dev {
+			devMark = "   (dev: tests only)"
+		}
 		if p.Requested != "" {
-			fmt.Fprintf(&b, "# %s @ %s\n", p.Name, p.Requested)
+			fmt.Fprintf(&b, "# %s @ %s%s\n", p.Name, p.Requested, devMark)
 		} else {
-			fmt.Fprintf(&b, "# %s\n", p.Name)
+			fmt.Fprintf(&b, "# %s%s\n", p.Name, devMark)
 		}
 		fmt.Fprintf(&b, "# ---------------------------------------------------------------------------\n")
 
@@ -200,7 +339,12 @@ func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string) string 
 		} else {
 			fmt.Fprintf(&b, "set(CPPM_TARGETS_%s \"\")\n", p.Name)
 		}
-		fmt.Fprintf(&b, "list(APPEND CPPM_DEPENDENCIES %s)\n\n", p.Name)
+		if p.Dev {
+			fmt.Fprintf(&b, "list(APPEND _cppm_dev_dependencies %s)\n", p.Name)
+		} else {
+			fmt.Fprintf(&b, "list(APPEND CPPM_DEPENDENCIES %s)\n", p.Name)
+		}
+		fmt.Fprintf(&b, "list(APPEND _cppm_all_dependencies %s)\n\n", p.Name)
 	}
 
 	if len(fetchNames) > 0 {
@@ -208,12 +352,21 @@ func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string) string 
 		fmt.Fprintf(&b, "FetchContent_MakeAvailable(%s)\n\n", strings.Join(fetchNames, " "))
 	}
 
+	if len(l.Packages) > 0 {
+		b.WriteString("# Dependencies are configured; BUILD_TESTING is this project's own again.\n")
+		b.WriteString("if(DEFINED _cppm_saved_build_testing)\n")
+		b.WriteString("    set(BUILD_TESTING \"${_cppm_saved_build_testing}\")\n")
+		b.WriteString("else()\n")
+		b.WriteString("    unset(BUILD_TESTING)\n")
+		b.WriteString("endif()\n\n")
+	}
+
 	// Verification. Because target names are partly inferred, a clear failure
 	// here is a primary user experience rather than an edge case.
 	b.WriteString(`# ---------------------------------------------------------------------------
 # Verify that every dependency really provides the target cppm expects.
 # ---------------------------------------------------------------------------
-foreach(_cppm_dep IN LISTS CPPM_DEPENDENCIES)
+foreach(_cppm_dep IN LISTS _cppm_all_dependencies)
     foreach(_cppm_target IN LISTS CPPM_TARGETS_${_cppm_dep})
         if(NOT TARGET ${_cppm_target})
             message(FATAL_ERROR
@@ -241,19 +394,47 @@ function(cppm_link_dependencies _cppm_link_target)
     set(_cppm_wanted ${ARGN})
     if(NOT _cppm_wanted)
         set(_cppm_wanted ${CPPM_DEPENDENCIES})
+        # A target declared "test": true in cppm.json also receives the dev
+        # dependencies. This is the only mechanism available: cppm does not edit
+        # CMakeLists.txt after init, so adding a test framework with --dev could
+        # not otherwise take effect without a hand edit there.
+        if("${_cppm_link_target}" IN_LIST _cppm_test_targets)
+            list(APPEND _cppm_wanted ${_cppm_dev_dependencies})
+        endif()
     endif()
 
     foreach(_cppm_dep IN LISTS _cppm_wanted)
         if(NOT DEFINED CPPM_TARGETS_${_cppm_dep})
             message(FATAL_ERROR
                 "cppm_link_dependencies: unknown dependency '${_cppm_dep}'.\n"
-                "Known dependencies: ${CPPM_DEPENDENCIES}")
+                "Known dependencies: ${_cppm_all_dependencies}")
         endif()
         foreach(_cppm_target IN LISTS CPPM_TARGETS_${_cppm_dep})
             target_link_libraries(${_cppm_link_target} PRIVATE ${_cppm_target})
         endforeach()
     endforeach()
 endfunction()
+
+# ---------------------------------------------------------------------------
+# Testing
+#
+# The CTest module, rather than a bare enable_testing(): it also writes the
+# DartConfiguration.tcl that 'ctest -T memcheck' reads, which is how valgrind
+# gets wired in later. It defines BUILD_TESTING and defaults it to ON, so
+# -DBUILD_TESTING=OFF turns the whole test tree off.
+#
+# This sits at the END of this file, after the dependencies, and the order is
+# load-bearing: a great many libraries build their own test suites when
+# BUILD_TESTING is set, so defining it before the dependencies are made
+# available would add every dependency's tests to your build. The section above
+# forces it OFF for exactly that reason and restores it afterwards.
+#
+# PROJECT_IS_TOP_LEVEL keeps a cppm project that is consumed through
+# add_subdirectory from switching testing on in its parent.
+# ---------------------------------------------------------------------------
+if(PROJECT_IS_TOP_LEVEL)
+    include(CTest)
+endif()
 `)
 	return b.String()
 }
@@ -286,12 +467,32 @@ type vendorStamp struct {
 	Note      string `json:"note"`
 }
 
+// testPreset is a CTest preset, which `cppm test` drives through
+// `ctest --preset <name>`. Schema version 2 introduced them; cppm emits 3.
+type testPreset struct {
+	Name            string `json:"name"`
+	ConfigurePreset string `json:"configurePreset"`
+	// Configuration matters for the same reason it does on a build preset:
+	// Visual Studio and Xcode ignore CMAKE_BUILD_TYPE and pick at test time.
+	Configuration string      `json:"configuration,omitempty"`
+	Output        *testOutput `json:"output,omitempty"`
+}
+
+// testOutput configures what CTest prints.
+//
+// outputOnFailure defaults to on because a failing test whose output is hidden
+// tells the user nothing except that something broke.
+type testOutput struct {
+	OutputOnFailure bool `json:"outputOnFailure,omitempty"`
+}
+
 type presetsFile struct {
 	Version              int                    `json:"version"`
 	CMakeMinimumRequired map[string]int         `json:"cmakeMinimumRequired"`
 	Vendor               map[string]vendorStamp `json:"vendor,omitempty"`
 	ConfigurePresets     []preset               `json:"configurePresets"`
 	BuildPresets         []buildPreset          `json:"buildPresets"`
+	TestPresets          []testPreset           `json:"testPresets"`
 }
 
 // Presets renders CMakePresets.json.
@@ -348,6 +549,12 @@ func Presets(m *manifest.Manifest) (string, error) {
 		BuildPresets: []buildPreset{
 			{Name: "debug", ConfigurePreset: "debug", Configuration: m.CMake.BuildTypeFor("debug")},
 			{Name: "release", ConfigurePreset: "release", Configuration: m.CMake.BuildTypeFor("release")},
+		},
+		TestPresets: []testPreset{
+			{Name: "debug", ConfigurePreset: "debug", Configuration: m.CMake.BuildTypeFor("debug"),
+				Output: &testOutput{OutputOnFailure: true}},
+			{Name: "release", ConfigurePreset: "release", Configuration: m.CMake.BuildTypeFor("release"),
+				Output: &testOutput{OutputOnFailure: true}},
 		},
 	}
 	b, err := json.MarshalIndent(pf, "", "  ")

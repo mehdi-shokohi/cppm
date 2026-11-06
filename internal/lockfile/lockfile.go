@@ -52,6 +52,11 @@ type Package struct {
 	Options      map[string]string `json:"options,omitempty"`
 	Dependencies []string          `json:"dependencies,omitempty"`
 
+	// Dev mirrors the manifest's dev flag. It is recorded here because the
+	// CMake generator reads only the lock, and it has to know which
+	// dependencies to keep out of CPPM_DEPENDENCIES.
+	Dev bool `json:"dev,omitempty"`
+
 	// ShallowOK records whether a shallow fetch of a pinned commit succeeded for
 	// this host, so a server that rejects it is not probed again on every sync.
 	ShallowOK *bool `json:"shallow_ok,omitempty"`

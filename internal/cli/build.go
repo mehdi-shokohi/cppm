@@ -65,25 +65,45 @@ CLion and Visual Studio read exactly the configuration the CLI uses.`,
 }
 
 func runBuild(o *buildOpts) error {
-	cmake := toolchain.CMake()
-	if !cmake.Found() {
-		return fmt.Errorf("cmake not found in PATH; run 'cppm doctor' for details")
-	}
-
-	p, err := project.Open(mustCwd())
+	p, cmake, err := openForBuild()
 	if err != nil {
 		return err
 	}
-
 	preset := "debug"
 	if o.release {
 		preset = "release"
 	}
-
-	if _, err := os.Stat(p.PresetsPath()); err != nil {
-		return fmt.Errorf("CMakePresets.json is missing from %s; was this project created by cppm init?", p.Root)
+	if err := configure(p, cmake, preset, o.clean); err != nil {
+		return err
 	}
+	if err := compile(p, cmake, preset, o); err != nil {
+		return err
+	}
+	fmt.Printf("\nbuilt %s -> %s\n", p.Manifest.Name, relTo(p.Root, p.BuildDir(preset)))
+	return nil
+}
 
+// openForBuild is the common entry for every command that drives CMake.
+func openForBuild() (*project.Project, toolchain.Tool, error) {
+	cmake := toolchain.CMake()
+	if !cmake.Found() {
+		return nil, cmake, fmt.Errorf("cmake not found in PATH; run 'cppm doctor' for details")
+	}
+	p, err := project.Open(mustCwd())
+	if err != nil {
+		return nil, cmake, err
+	}
+	if _, err := os.Stat(p.PresetsPath()); err != nil {
+		return nil, cmake, fmt.Errorf("CMakePresets.json is missing from %s; was this project created by cppm init?", p.Root)
+	}
+	return p, cmake, nil
+}
+
+// configure syncs the generated CMake and configures the build tree.
+//
+// Shared by build and test so that a test run can never execute against a tree
+// configured from an older cppm.json.
+func configure(p *project.Project, cmake toolchain.Tool, preset string, clean bool) error {
 	changes, err := Sync(p)
 	if err != nil {
 		return err
@@ -105,7 +125,7 @@ func runBuild(o *buildOpts) error {
 		}
 	}
 
-	if o.clean {
+	if clean {
 		fmt.Printf("removing %s\n", relTo(p.Root, buildDir))
 		if err := os.RemoveAll(buildDir); err != nil {
 			return fmt.Errorf("clean %s: %w", buildDir, err)
@@ -113,10 +133,11 @@ func runBuild(o *buildOpts) error {
 	}
 
 	fmt.Printf("configuring (%s)\n", preset)
-	if err := toolchain.Run(p.Root, cmake.Path, "--preset", preset); err != nil {
-		return err
-	}
+	return toolchain.Run(p.Root, cmake.Path, "--preset", preset)
+}
 
+// compile runs the build preset.
+func compile(p *project.Project, cmake toolchain.Tool, preset string, o *buildOpts) error {
 	fmt.Printf("\nbuilding (%s)\n", preset)
 	args := []string{"--build", "--preset", preset}
 	if o.jobs > 0 {
@@ -128,12 +149,7 @@ func runBuild(o *buildOpts) error {
 	if o.verbose {
 		args = append(args, "--verbose")
 	}
-	if err := toolchain.Run(p.Root, cmake.Path, args...); err != nil {
-		return err
-	}
-
-	fmt.Printf("\nbuilt %s -> %s\n", p.Manifest.Name, relTo(p.Root, buildDir))
-	return nil
+	return toolchain.Run(p.Root, cmake.Path, args...)
 }
 
 // staleToolchain reports whether an existing build tree was configured with a

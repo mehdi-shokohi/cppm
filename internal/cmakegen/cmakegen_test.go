@@ -1,6 +1,7 @@
 package cmakegen
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -281,5 +282,208 @@ func TestPathDependencyUsesAddSubdirectory(t *testing.T) {
 	}
 	if strings.Contains(out, "FetchContent_Declare(MyLib") {
 		t.Error("path dependency must not be fetched")
+	}
+}
+
+// --- dev dependencies and testing (roadmap 0.2.1, 0.2.2) ---
+
+// devLock is sampleLock plus a test-only dependency.
+func devLock() *lockfile.Lock {
+	l := sampleLock()
+	l.Put(lockfile.Package{
+		Name:         "Catch2",
+		Source:       manifest.SourceGit,
+		URL:          "https://github.com/catchorg/Catch2.git",
+		Requested:    "v3.7.1",
+		Commit:       "fa43b77429ba76c462b1898d6cd2f2d7a9416b14",
+		Targets:      []string{"Catch2::Catch2WithMain"},
+		TargetOrigin: lockfile.OriginRecipe,
+		Dev:          true,
+	})
+	return l
+}
+
+// withTests returns a manifest holding one executable and one test target.
+func withTests() *manifest.Manifest {
+	m := manifest.New("MyApp", 20)
+	m.Targets["MyApp_tests"] = manifest.Target{
+		Kind:    manifest.KindExecutable,
+		Sources: []string{"tests/MyApp_test.cpp"},
+		Test:    true,
+	}
+	return m
+}
+
+// The entire point of the dev flag: CPPM_DEPENDENCIES is what
+// cppm_link_dependencies() links by default, so a dev dependency appearing in it
+// would compile a test framework into a release binary.
+func TestDevDependencyIsNotInCppmDependencies(t *testing.T) {
+	out := Managed(withTests(), devLock(), "test")
+
+	if !strings.Contains(out, "list(APPEND CPPM_DEPENDENCIES fmt)") {
+		t.Error("a normal dependency must be appended to CPPM_DEPENDENCIES")
+	}
+	if strings.Contains(out, "list(APPEND CPPM_DEPENDENCIES Catch2)") {
+		t.Error("a dev dependency must NOT be appended to CPPM_DEPENDENCIES")
+	}
+	if !strings.Contains(out, "list(APPEND _cppm_dev_dependencies Catch2)") {
+		t.Error("a dev dependency must be tracked in _cppm_dev_dependencies")
+	}
+	// It still has to be fetched and verified, or CPPM_TARGETS_Catch2 is a lie.
+	if !strings.Contains(out, "FetchContent_MakeAvailable(Catch2 fmt)") {
+		t.Error("a dev dependency must still be made available")
+	}
+	if !strings.Contains(out, "list(APPEND _cppm_all_dependencies Catch2)") {
+		t.Error("a dev dependency must be verified like any other")
+	}
+}
+
+// A dev dependency reaches the test target through the generated function, not
+// through an edit to CMakeLists.txt, because cppm never rewrites that file.
+func TestTestTargetsReceiveDevDependencies(t *testing.T) {
+	out := Managed(withTests(), devLock(), "test")
+	if !strings.Contains(out, "set(_cppm_test_targets MyApp_tests)") {
+		t.Fatalf("test targets were not declared to the generated include:\n%s", out)
+	}
+	if !strings.Contains(out, `if("${_cppm_link_target}" IN_LIST _cppm_test_targets)`) {
+		t.Error("cppm_link_dependencies does not add dev dependencies for test targets")
+	}
+}
+
+// A project with no test target must still produce a valid file: the variable
+// has to exist, because the function dereferences it unconditionally.
+func TestTestTargetListIsAlwaysDefined(t *testing.T) {
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
+	if !strings.Contains(out, `set(_cppm_test_targets "")`) {
+		t.Error("_cppm_test_targets must be defined even with no test targets")
+	}
+}
+
+// include(CTest) defines BUILD_TESTING and defaults it to ON, and a great many
+// libraries build their own tests when it is set. Emitting it before the
+// dependencies would add every dependency's test suite to the build -- the same
+// failure mode as emitting cache options after FetchContent_Declare.
+func TestCTestComesAfterTheDependencies(t *testing.T) {
+	out := Managed(withTests(), devLock(), "test")
+
+	ctest := strings.Index(out, "include(CTest)")
+	available := strings.Index(out, "FetchContent_MakeAvailable(")
+	declare := strings.Index(out, "FetchContent_Declare(")
+	if ctest < 0 {
+		t.Fatal("include(CTest) is missing, so add_test() registers nothing")
+	}
+	if ctest < available {
+		t.Error("include(CTest) must come after FetchContent_MakeAvailable, or dependencies build their own tests")
+	}
+
+	// BUILD_TESTING is forced off for the dependency section for the same
+	// reason, and restored for the project's own tests.
+	off := strings.Index(out, "set(BUILD_TESTING OFF)")
+	restore := strings.Index(out, `set(BUILD_TESTING "${_cppm_saved_build_testing}")`)
+	if off < 0 || restore < 0 {
+		t.Fatalf("BUILD_TESTING is not suppressed around the dependency section:\n%s", out)
+	}
+	if off > declare {
+		t.Error("BUILD_TESTING must be forced off before FetchContent_Declare, where it is still inert")
+	}
+	if restore < available {
+		t.Error("BUILD_TESTING must be restored only after the dependencies are configured")
+	}
+}
+
+// A cppm project consumed through add_subdirectory must not switch testing on
+// in its parent.
+func TestCTestIsGuardedToTheTopLevelProject(t *testing.T) {
+	out := Managed(withTests(), devLock(), "test")
+	idx := strings.Index(out, "include(CTest)")
+	if idx < 0 {
+		t.Fatal("include(CTest) is missing")
+	}
+	if !strings.Contains(out[:idx], "if(PROJECT_IS_TOP_LEVEL)") {
+		t.Error("include(CTest) must be guarded by PROJECT_IS_TOP_LEVEL")
+	}
+}
+
+func TestCMakeListsRegistersTestTargetsWithCTest(t *testing.T) {
+	out := CMakeLists(withTests())
+	if !strings.Contains(out, "add_test(NAME MyApp_tests COMMAND MyApp_tests)") {
+		t.Errorf("a test target was not registered with CTest:\n%s", out)
+	}
+	if strings.Contains(out, "add_test(NAME MyApp COMMAND MyApp)") {
+		t.Error("a non-test target must not be registered with CTest")
+	}
+}
+
+// target_link_libraries() treats a name that is not yet a target as a plain -l
+// flag, so a test target that links the library must be declared after it.
+func TestTestTargetsAreEmittedAfterTheTargetsTheyLink(t *testing.T) {
+	m := manifest.New("MyLib", 20)
+	m.Targets["MyLib"] = manifest.Target{Kind: manifest.KindLibrary, Sources: []string{"src/MyLib.cpp"}}
+	// Named so that it sorts BEFORE the library, which is what makes this a
+	// real risk rather than an accident of alphabetical order.
+	m.Targets["AAA_tests"] = manifest.Target{
+		Kind: manifest.KindExecutable, Sources: []string{"tests/t.cpp"}, Test: true,
+	}
+	out := CMakeLists(m)
+
+	lib := strings.Index(out, "add_library(MyLib")
+	test := strings.Index(out, "add_executable(AAA_tests")
+	if lib < 0 || test < 0 {
+		t.Fatalf("both targets should be emitted:\n%s", out)
+	}
+	if test < lib {
+		t.Error("the test target must be emitted after the library it links")
+	}
+	if !strings.Contains(out, "target_link_libraries(AAA_tests PRIVATE MyLib)") {
+		t.Errorf("a test target in a library project should link that library:\n%s", out)
+	}
+}
+
+// With two libraries cppm cannot know which the tests are for, and a wrongly
+// linked scaffold is worse than a comment saying what to write.
+func TestAmbiguousLibrariesAreNotGuessed(t *testing.T) {
+	m := manifest.New("MyApp", 20)
+	m.Targets["LibA"] = manifest.Target{Kind: manifest.KindLibrary, Sources: []string{"a.cpp"}}
+	m.Targets["LibB"] = manifest.Target{Kind: manifest.KindLibrary, Sources: []string{"b.cpp"}}
+	m.Targets["t"] = manifest.Target{Kind: manifest.KindExecutable, Sources: []string{"t.cpp"}, Test: true}
+	out := CMakeLists(m)
+	if strings.Contains(out, "target_link_libraries(t PRIVATE Lib") {
+		t.Errorf("cppm must not pick between two libraries:\n%s", out)
+	}
+}
+
+func TestPresetsCarryTestPresets(t *testing.T) {
+	out, err := Presets(manifest.New("MyApp", 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pf struct {
+		TestPresets []struct {
+			Name            string `json:"name"`
+			ConfigurePreset string `json:"configurePreset"`
+			Configuration   string `json:"configuration"`
+			Output          struct {
+				OutputOnFailure bool `json:"outputOnFailure"`
+			} `json:"output"`
+		} `json:"testPresets"`
+	}
+	if err := json.Unmarshal([]byte(out), &pf); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.TestPresets) != 2 {
+		t.Fatalf("expected debug and release test presets, got %d", len(pf.TestPresets))
+	}
+	for _, tp := range pf.TestPresets {
+		if tp.ConfigurePreset != tp.Name {
+			t.Errorf("test preset %q should use the configure preset of the same name", tp.Name)
+		}
+		// Multi-config generators ignore CMAKE_BUILD_TYPE and pick at test time.
+		if tp.Configuration == "" {
+			t.Errorf("test preset %q has no configuration, so Visual Studio and Xcode cannot use it", tp.Name)
+		}
+		// A failing test whose output is hidden reports only that something broke.
+		if !tp.Output.OutputOnFailure {
+			t.Errorf("test preset %q should print output on failure", tp.Name)
+		}
 	}
 }

@@ -209,6 +209,7 @@ func reconcile(p *project.Project) error {
 					Targets:      dep.Targets,
 					TargetOrigin: originFor(dep.Targets),
 					Options:      dep.Options,
+					Dev:          dep.Dev,
 				})
 				continue
 			}
@@ -223,6 +224,10 @@ func reconcile(p *project.Project) error {
 			locked.TargetOrigin = lockfile.OriginExplicit
 		}
 		locked.Options = dep.Options
+		// dev is intent, not resolution, so the manifest is authoritative: adding
+		// "dev": true by hand and running sync must take effect without a
+		// re-resolve. This moves no pin.
+		locked.Dev = dep.Dev
 		if dep.Source == "path" {
 			locked.Path = dep.Path
 		}

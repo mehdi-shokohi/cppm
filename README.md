@@ -7,6 +7,7 @@ cppm init MyApp
 cd MyApp
 cppm add github:fmtlib/fmt@11.1.4
 cppm build
+cppm test
 ```
 
 ## Install
@@ -63,23 +64,27 @@ v1 is three things: start a project, download a dependency, wire it into CMake.
 
 | Working | Not yet |
 |---|---|
-| `init` — scaffold a project that builds | Transitive dependency pinning |
-| `add` / `remove` — git and local dependencies | Conflict detection |
-| `update` — re-resolve refs | Windows / macOS verification |
-| `sync` / `apply` — apply cppm.json to CMake | Non-CMake libraries |
-| `build` — configure and build via presets | |
+| `init` — scaffold a project that builds | Warnings, hardening, sanitizers, valgrind |
+| `add` / `remove` — git and local dependencies | Transitive dependency pinning |
+| `update` — re-resolve refs | Conflict detection |
+| `sync` / `apply` — apply cppm.json to CMake | Windows / macOS verification |
+| `build` — configure and build via presets | Non-CMake libraries |
+| `test` — build and run via CTest | |
+| Dev-only dependencies, kept out of release builds | |
 | Target discovery: recipes + source scan + ask | |
 | `list`, `info`, `doctor`, `clean` | |
 
 ## Commands
 
 ```
-cppm init [<dir>] [--std 20] [--name N] [--lib] [--compiler clang++] [--generator Ninja] [--force]
-cppm add <spec> [--target T] [--name N] [--non-interactive] [--no-discover] [--force]
+cppm init [<dir>] [--std 20] [--name N] [--lib] [--with-tests] [--compiler clang++]
+          [--generator Ninja] [--force]
+cppm add <spec> [--target T] [--name N] [--dev] [--non-interactive] [--no-discover] [--force]
 cppm remove <dep>...           alias: rm
 cppm update [<dep>...] [--dry-run]
 cppm sync [--quiet]            aliases: apply, regen
 cppm build [--debug|--release] [--clean] [--jobs N] [--target T] [--verbose]
+cppm test [--debug|--release] [--filter RE] [--jobs N] [--verbose] [--list] [--no-build] [--fail-fast]
 cppm list [--long]
 cppm info <dependency>
 cppm doctor
@@ -131,6 +136,74 @@ targets:  unresolved
 ```
 
 An inferred name is always labelled as inferred, never presented as fact.
+
+### Dev-only dependencies
+
+Catch2, googletest, doctest and benchmark exist to build the tests, not the product. `--dev` keeps
+them out of everything that ships:
+
+```bash
+cppm add github:catchorg/Catch2@v3.7.1 --dev
+```
+
+A dev dependency is still fetched, configured and verified — `CPPM_TARGETS_<dep>` works exactly as
+it does for any other. It is simply left out of `CPPM_DEPENDENCIES`, which is what
+`cppm_link_dependencies(<target>)` links when given no list. Instead it is linked into the targets
+marked `"test": true` in `cppm.json`, so adding a framework takes effect without touching
+`CMakeLists.txt`.
+
+Listing a dev dependency on a target that is not a test is a `cppm.json` error rather than a
+surprise in a release binary:
+
+```
+target "MyApp" depends on "Catch2", which is marked "dev": true in cppm.json.
+a dev dependency may only be linked into a test target. Either add "test": true to
+targets.MyApp, or remove "dev": true from dependencies.Catch2 to link it everywhere
+```
+
+## Tests
+
+```bash
+cppm init MyApp --with-tests     # a tests/ directory and a first test
+cd MyApp
+cppm test
+```
+
+`cppm test` is a wrapper over CMake presets, like `build`:
+
+```
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug
+```
+
+It builds first on purpose — a test run against a stale build tree reports on code that is no
+longer there. Pass `--no-build` for the fastest loop when you know the tree is current.
+
+```bash
+cppm test --release
+cppm test --filter parser        # ctest -R
+cppm test --verbose              # output from passing tests too
+cppm test --list                 # what would run
+```
+
+Failing tests always print their own output, because the test presets set `outputOnFailure`.
+
+The test scaffolded by `--with-tests` uses **no framework**: `init` has to work offline and before
+any dependency exists, so the first suite compiles and runs against nothing but the standard
+library. Swap in a real one when you want it — the scaffolded file says how.
+
+Anything registered with `add_test()` in your `CMakeLists.txt` is run, whether cppm scaffolded it
+or you wrote it. Marking a target `"test": true` in `cppm.json` is what routes dev dependencies to
+it; it is a declaration, never inferred from a name like `foo_tests`.
+
+Two CMake facts cppm handles so you do not have to:
+
+- **`include(CTest)` is emitted after the dependencies.** It defines `BUILD_TESTING` and defaults
+  it to `ON`, and a great many libraries build their own test suites when that is set. cppm also
+  forces `BUILD_TESTING` off across the dependency section and restores it afterwards.
+- **`include(CTest)` is guarded by `PROJECT_IS_TOP_LEVEL`**, so a cppm project consumed through
+  `add_subdirectory` does not switch testing on in its parent.
 
 ## Changing settings
 
@@ -198,6 +271,7 @@ MyApp/
 ├── CMakePresets.json  cppm-generated presets           (commit this)
 ├── src/main.cpp
 ├── include/
+├── tests/             with --with-tests                (commit this)
 ├── .cppm/             generated files                  (git-ignored)
 └── build/             build output                     (git-ignored)
 ```
@@ -212,7 +286,7 @@ exactly four public names, which is a compatibility surface cppm will not change
 | `.cppm/generated/cppm.cmake` | the include path |
 | `cppm_link_dependencies(<target> [deps...])` | link entry point |
 | `CPPM_TARGETS_<dep>` | one dependency's targets, for manual wiring |
-| `CPPM_DEPENDENCIES` | all dependency names |
+| `CPPM_DEPENDENCIES` | the dependency names that ship (dev dependencies excluded) |
 
 Anything prefixed `_cppm_` is private. To take over linking yourself, delete the
 `cppm_link_dependencies` call and use `CPPM_TARGETS_<dep>` in your own `target_link_libraries`.

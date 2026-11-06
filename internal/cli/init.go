@@ -20,6 +20,7 @@ type initOpts struct {
 	name      string
 	force     bool
 	lib       bool
+	withTests bool
 	compiler  string
 	generator string
 }
@@ -32,6 +33,7 @@ func cmdInit() *Command {
 		fs.StringVar(&o.name, "name", "", "project name (default: the directory name)")
 		fs.BoolVar(&o.force, "force", false, "overwrite an existing cppm.json")
 		fs.BoolVar(&o.lib, "lib", false, "scaffold a library instead of an executable")
+		fs.BoolVar(&o.withTests, "with-tests", false, "also scaffold a tests/ directory and a first test")
 		fs.StringVar(&o.compiler, "compiler", "", "C++ compiler: clang++, g++, or a path (default: CMake's choice)")
 		fs.StringVar(&o.generator, "generator", "", "CMake generator (default: Ninja when installed)")
 		return fs, o
@@ -53,6 +55,15 @@ Written files:
     src/main.cpp        a hello-world
     .gitignore
     .cppm/              generated files             (git-ignored)
+
+With --with-tests, also:
+    tests/<name>_test.cpp   a first test, registered with CTest
+    a test target in cppm.json marked "test": true, and add_test() wiring
+
+The scaffolded test uses no framework, so it compiles and runs offline before
+any dependency exists. Add a real one when you want it:
+
+    cppm add github:catchorg/Catch2@v3.7.1 --dev
 
 Existing files are never clobbered; they are reported as kept.`,
 		flagSet: func() *flag.FlagSet { fs, _ := build(); return fs },
@@ -126,6 +137,16 @@ func runInit(dir string, o *initOpts) error {
 			name: {Kind: manifest.KindLibrary, Sources: []string{"src/" + name + ".cpp"}},
 		}
 	}
+	testName, testSource := "", ""
+	if o.withTests {
+		testName = name + "_tests"
+		testSource = "tests/" + name + "_test.cpp"
+		m.Targets[testName] = manifest.Target{
+			Kind:    manifest.KindExecutable,
+			Sources: []string{testSource},
+			Test:    true,
+		}
+	}
 	if err := m.Validate(); err != nil {
 		return err
 	}
@@ -194,6 +215,10 @@ func runInit(dir string, o *initOpts) error {
 		{".gitignore", cmakegen.GitIgnore()},
 		{filepath.Join("include", ".gitkeep"), ""},
 	}
+	if o.withTests {
+		userOwned = append(userOwned,
+			struct{ rel, content string }{testSource, cmakegen.TestMainCPP(name)})
+	}
 
 	desc := fmt.Sprintf("C++%d", o.std)
 	if m.Toolchain.CXX != "" {
@@ -227,6 +252,9 @@ func runInit(dir string, o *initOpts) error {
 		fmt.Printf("    cd %s\n", rel)
 	}
 	fmt.Print("    cppm build\n")
+	if o.withTests {
+		fmt.Print("    cppm test\n")
+	}
 	return nil
 }
 

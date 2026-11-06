@@ -66,10 +66,16 @@ func cmdList() *Command {
 				if requested == "" {
 					requested = "(default branch)"
 				}
+				// Visible in the default view, not only under --long: whether a
+				// dependency ships is the most consequential thing about it.
+				source := d.Source
+				if d.Dev {
+					source += " (dev)"
+				}
 				if *long {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", n, d.Source, requested, commit, targets, origin)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", n, source, requested, commit, targets, origin)
 				} else {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", n, d.Source, requested, targets)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", n, source, requested, targets)
 				}
 			}
 			if err := w.Flush(); err != nil {
@@ -88,6 +94,19 @@ func cmdList() *Command {
 			if len(guessed) > 0 {
 				fmt.Printf("\nnote: target names for %s were inferred, not declared.\n", strings.Join(guessed, ", "))
 				fmt.Println("      if linking fails, pin them with \"targets\" in cppm.json")
+			}
+			if dev := p.Manifest.DevDependencyNames(); len(dev) > 0 {
+				tests := p.Manifest.TestTargetNames()
+				target := "no test target yet -- see 'cppm test'"
+				if len(tests) > 0 {
+					target = strings.Join(tests, ", ")
+				}
+				verb := "is a dev dependency"
+				if len(dev) > 1 {
+					verb = "are dev dependencies"
+				}
+				fmt.Printf("\nnote: %s %s, linked only into %s.\n",
+					strings.Join(dev, ", "), verb, target)
 			}
 			return nil
 		},
@@ -121,6 +140,9 @@ func cmdInfo() *Command {
 			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 			fmt.Fprintf(w, "name\t%s\n", name)
 			fmt.Fprintf(w, "source\t%s\n", d.Source)
+			if d.Dev {
+				fmt.Fprintf(w, "dev\tyes -- tests only, never linked into a shipping target\n")
+			}
 			if d.URL != "" {
 				fmt.Fprintf(w, "url\t%s\n", d.URL)
 			}

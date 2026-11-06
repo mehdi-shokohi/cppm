@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -220,5 +221,107 @@ func TestNormalizeCXXAndCompanionC(t *testing.T) {
 		if gotC := CompanionC(gotCXX); gotC != tc.c {
 			t.Errorf("CompanionC(%q) = %q, want %q", gotCXX, gotC, tc.c)
 		}
+	}
+}
+
+// --- dev dependencies (roadmap 0.2.2) ---
+
+// A test framework listed on a shipping target is a release binary with Catch2
+// compiled into it. Catching that is the entire reason the dev flag exists, so
+// it has to be a validation error rather than a warning.
+func TestDevDependencyOnNonTestTargetIsRejected(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Dependencies["Catch2"] = Dependency{
+		Source: SourceGit, URL: "https://github.com/catchorg/Catch2.git", Version: "v3.7.1", Dev: true,
+	}
+	tgt := m.Targets["MyApp"]
+	tgt.Dependencies = []string{"Catch2"}
+	m.Targets["MyApp"] = tgt
+
+	err := m.Validate()
+	if err == nil {
+		t.Fatal("a dev dependency on a non-test target must be rejected")
+	}
+	// The error has to say which of the two edits to make; cppm's users do not
+	// know what "dev" means by itself.
+	for _, want := range []string{"Catch2", "\"test\": true", "\"dev\": true"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestDevDependencyOnTestTargetIsAccepted(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Dependencies["Catch2"] = Dependency{
+		Source: SourceGit, URL: "https://github.com/catchorg/Catch2.git", Version: "v3.7.1", Dev: true,
+	}
+	m.Targets["MyApp_tests"] = Target{
+		Kind:         KindExecutable,
+		Sources:      []string{"tests/MyApp_test.cpp"},
+		Dependencies: []string{"Catch2"},
+		Test:         true,
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("a dev dependency on a test target is legal: %v", err)
+	}
+}
+
+func TestDevDependencyNames(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Dependencies["fmt"] = Dependency{Source: SourceGit, URL: "https://example.com/fmt.git"}
+	m.Dependencies["Catch2"] = Dependency{Source: SourceGit, URL: "https://example.com/c.git", Dev: true}
+	m.Dependencies["benchmark"] = Dependency{Source: SourceGit, URL: "https://example.com/b.git", Dev: true}
+
+	// Sorted, because this is rendered into a committed file.
+	if got := m.DevDependencyNames(); !reflect.DeepEqual(got, []string{"Catch2", "benchmark"}) {
+		t.Errorf("dev dependencies = %v, want [Catch2 benchmark]", got)
+	}
+}
+
+func TestTestTargetNames(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Targets["z_tests"] = Target{Kind: KindExecutable, Sources: []string{"z.cpp"}, Test: true}
+	m.Targets["a_tests"] = Target{Kind: KindExecutable, Sources: []string{"a.cpp"}, Test: true}
+	if got := m.TestTargetNames(); !reflect.DeepEqual(got, []string{"a_tests", "z_tests"}) {
+		t.Errorf("test targets = %v, want [a_tests z_tests]", got)
+	}
+}
+
+// dev and test are absent from a manifest that uses neither, so adding the
+// fields does not churn every existing cppm.json on the next save.
+func TestDevAndTestAreOmittedWhenFalse(t *testing.T) {
+	b, err := New("MyApp", 20).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"\"dev\"", "\"test\""} {
+		if strings.Contains(string(b), unwanted) {
+			t.Errorf("%s should be omitted when false:\n%s", unwanted, b)
+		}
+	}
+}
+
+// Round-tripping matters because Load uses DisallowUnknownFields: a field that
+// serialises but does not parse would make cppm reject its own output.
+func TestDevAndTestRoundTrip(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Dependencies["Catch2"] = Dependency{Source: SourceGit, URL: "https://example.com/c.git", Dev: true}
+	m.Targets["MyApp_tests"] = Target{
+		Kind: KindExecutable, Sources: []string{"t.cpp"}, Test: true, Dependencies: []string{"Catch2"},
+	}
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Dependencies["Catch2"].Dev {
+		t.Error("dev was lost in the round trip")
+	}
+	if !got.Targets["MyApp_tests"].Test {
+		t.Error("test was lost in the round trip")
 	}
 }

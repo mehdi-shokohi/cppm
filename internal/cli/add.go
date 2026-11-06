@@ -20,6 +20,7 @@ import (
 type addOpts struct {
 	name          string
 	targets       string
+	dev           bool
 	noInteractive bool
 	noDiscover    bool
 	forceReplace  bool
@@ -31,6 +32,7 @@ func cmdAdd() *Command {
 		fs := newFlagSet("add")
 		fs.StringVar(&o.name, "name", "", "dependency name (default: derived from the repository)")
 		fs.StringVar(&o.targets, "target", "", "CMake target(s) to link, comma-separated; skips discovery")
+		fs.BoolVar(&o.dev, "dev", false, "needed only by the tests; never linked into a shipping target")
 		fs.BoolVar(&o.noInteractive, "non-interactive", false, "never prompt; record unresolved targets instead")
 		fs.BoolVar(&o.noDiscover, "no-discover", false, "do not download the source to look for targets")
 		fs.BoolVar(&o.forceReplace, "force", false, "replace an existing dependency of the same name")
@@ -58,7 +60,16 @@ With no @ref, cppm lists the repository's tags and asks which to pin. Pass
 Target names are found in this order: --target, then the curated recipe
 database, then a scan of the dependency's own CMake. If none of those is
 confident, cppm asks rather than guessing, because a wrong target name produces
-a build that links the wrong thing.`,
+a build that links the wrong thing.
+
+A test framework belongs behind --dev:
+
+    cppm add github:catchorg/Catch2@v3.7.1 --dev
+
+A --dev dependency is still fetched and configured, but it is left out of
+CPPM_DEPENDENCIES and so is never linked into a shipping target. It is linked
+into the targets marked "test": true in cppm.json -- which is what
+'cppm init --with-tests' scaffolds.`,
 		flagSet: func() *flag.FlagSet { fs, _ := build(); return fs },
 		Run: func(args []string) error {
 			fs, o := build()
@@ -94,14 +105,14 @@ func runAdd(spec string, o *addOpts) error {
 	}
 
 	if s.Source == "path" {
-		return addPath(p, s)
+		return addPath(p, s, o)
 	}
 	return addGit(p, s, o)
 }
 
 // addPath records a local dependency. Nothing is resolved or pinned: a path
 // dependency is editable by design.
-func addPath(p *project.Project, s vcs.Spec) error {
+func addPath(p *project.Project, s vcs.Spec, o *addOpts) error {
 	abs := s.Path
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(p.Root, s.Path)
@@ -120,22 +131,35 @@ func addPath(p *project.Project, s vcs.Spec) error {
 		return fmt.Errorf("%s is inside this project; add its directory with add_subdirectory in CMakeLists.txt instead", abs)
 	}
 
-	res, err := discover.Scan(abs, s.Name)
-	if err != nil {
-		return err
-	}
-	targets := res.Candidates
 	var chosen []string
 	origin := lockfile.OriginUnresolved
-	if res.Confident && len(targets) > 0 {
-		chosen = []string{res.Best}
-		origin = lockfile.OriginInferred
+
+	// --target is tier 1 of discovery for a git dependency and has to be here
+	// too: a local library is exactly the case where the user already knows the
+	// target name, because they wrote it.
+	if o.targets != "" {
+		for _, t := range strings.Split(o.targets, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				chosen = append(chosen, t)
+			}
+		}
+		origin = lockfile.OriginExplicit
+	} else {
+		res, err := discover.Scan(abs, s.Name)
+		if err != nil {
+			return err
+		}
+		if res.Confident && len(res.Candidates) > 0 {
+			chosen = []string{res.Best}
+			origin = lockfile.OriginInferred
+		}
 	}
 
 	p.Manifest.Dependencies[s.Name] = manifest.Dependency{
 		Source:  manifest.SourcePath,
 		Path:    filepath.ToSlash(s.Path),
 		Targets: chosen,
+		Dev:     o.dev,
 	}
 	p.Lock.Put(lockfile.Package{
 		Name:         s.Name,
@@ -143,6 +167,7 @@ func addPath(p *project.Project, s vcs.Spec) error {
 		Path:         filepath.ToSlash(s.Path),
 		Targets:      chosen,
 		TargetOrigin: origin,
+		Dev:          o.dev,
 	})
 	if err := p.SaveManifest(); err != nil {
 		return err
@@ -150,8 +175,13 @@ func addPath(p *project.Project, s vcs.Spec) error {
 	if _, err := Sync(p); err != nil {
 		return err
 	}
-	fmt.Printf("added %s (local %s)\n", s.Name, s.Path)
+	kind := ""
+	if o.dev {
+		kind = " (dev: tests only)"
+	}
+	fmt.Printf("added %s (local %s)%s\n", s.Name, s.Path, kind)
 	reportTargets(s.Name, chosen, origin)
+	reportDevWiring(p, s.Name, o.dev)
 	return nil
 }
 
@@ -180,6 +210,7 @@ func addGit(p *project.Project, s vcs.Spec, o *addOpts) error {
 		URL:     s.URL,
 		Version: res.Requested,
 		Options: options,
+		Dev:     o.dev,
 	}
 	// Only an explicit choice is written to the manifest; an inferred name lives
 	// in the lock, so re-resolution can improve on it later.
@@ -201,6 +232,7 @@ func addGit(p *project.Project, s vcs.Spec, o *addOpts) error {
 		Targets:      targets,
 		TargetOrigin: origin,
 		Options:      options,
+		Dev:          o.dev,
 	})
 
 	if err := p.SaveManifest(); err != nil {
@@ -210,8 +242,13 @@ func addGit(p *project.Project, s vcs.Spec, o *addOpts) error {
 		return err
 	}
 
-	fmt.Printf("\nadded %s %s\n", s.Name, dep.Version)
+	kind := ""
+	if o.dev {
+		kind = " (dev: tests only)"
+	}
+	fmt.Printf("\nadded %s %s%s\n", s.Name, dep.Version, kind)
 	reportTargets(s.Name, targets, origin)
+	reportDevWiring(p, s.Name, o.dev)
 	if notes != "" {
 		fmt.Printf("  note: %s\n", notes)
 	}
@@ -367,6 +404,26 @@ func reportTargets(dep string, targets []string, origin string) {
 	if origin == lockfile.OriginInferred {
 		fmt.Printf("            inferred, not declared -- if linking fails, pin it in cppm.json\n")
 	}
+}
+
+// reportDevWiring explains where a dev dependency will actually be linked.
+//
+// cppm cannot edit CMakeLists.txt, so if the project has no test target the
+// dependency is fetched and then linked to nothing -- which looks like cppm
+// silently doing nothing. Say so instead.
+func reportDevWiring(p *project.Project, name string, dev bool) {
+	if !dev {
+		return
+	}
+	tests := p.Manifest.TestTargetNames()
+	if len(tests) > 0 {
+		fmt.Printf("  linked to: %s\n", strings.Join(tests, " "))
+		return
+	}
+	fmt.Printf("  linked to: nothing yet -- no target in cppm.json is marked \"test\": true\n")
+	fmt.Printf("             add a test target with 'cppm init --with-tests', or mark one by hand:\n")
+	fmt.Printf("               \"targets\": { \"<name>\": { ..., \"test\": true } }\n")
+	fmt.Printf("             then run 'cppm sync'. Or link it yourself with ${CPPM_TARGETS_%s}.\n", name)
 }
 
 func describeRef(res vcs.Resolution) string {

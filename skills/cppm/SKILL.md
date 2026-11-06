@@ -45,6 +45,18 @@ cppm build                        # fetches, configures, compiles
 Then write code in `src/main.cpp` and `#include <fmt/core.h>` as normal. No CMake editing is needed
 to use the dependency.
 
+With tests:
+
+```sh
+cppm init MyApp --std 20 --with-tests
+cd MyApp
+cppm add github:catchorg/Catch2@v3.7.1 --dev --non-interactive
+cppm test
+```
+
+The scaffolded test uses no framework, so it runs before any dependency exists. `--dev` is what
+keeps Catch2 out of the release binary.
+
 ## Command reference
 
 Every flag below accepts one or two leading dashes (`-std` or `--std`), and flags may appear before
@@ -62,6 +74,7 @@ the current directory; otherwise the directory is created. Existing files are ne
 | `--compiler <s>` | `clang++`, `g++`, or a path (default: CMake's choice) |
 | `--generator <s>` | CMake generator (default: Ninja when installed) |
 | `--lib` | scaffold a library instead of an executable |
+| `--with-tests` | also scaffold `tests/`, a first test and the `add_test()` wiring |
 | `--force` | overwrite an existing `cppm.json` |
 
 ### cppm add &lt;spec&gt;
@@ -72,6 +85,7 @@ Resolves a dependency, pins it to a commit, and wires it into CMake.
 |---|---|
 | `--non-interactive` | never prompt; record unresolved targets instead |
 | `--target <s>` | CMake target(s) to link, comma-separated; skips discovery |
+| `--dev` | test-only; never linked into a shipping target |
 | `--name <s>` | dependency name (default: derived from the repository) |
 | `--no-discover` | do not download the source to look for targets |
 | `--force` | replace an existing dependency of the same name |
@@ -107,6 +121,24 @@ Syncs, configures and builds, by wrapping `cmake --preset` and `cmake --build --
 | `--verbose` | show the compiler command lines |
 
 Output lands in `build/debug/` or `build/release/`.
+
+### cppm test
+
+Builds, then runs the tests by wrapping `ctest --preset`. Builds first on purpose: a test run
+against a stale build tree reports on code that is no longer there.
+
+| Flag | Meaning |
+|---|---|
+| `--debug` | test the debug preset (default) |
+| `--release` | test the release preset |
+| `--filter <re>` | run only tests whose name matches this regular expression (`ctest -R`) |
+| `--jobs <n>` | run this many tests in parallel |
+| `--verbose` | show output from passing tests too |
+| `--list` | list the tests without running them |
+| `--no-build` | do not build first; test whatever is in the build tree |
+| `--fail-fast` | stop at the first failing test |
+
+Failing tests always print their own output; the generated test presets set `outputOnFailure`.
 
 ### cppm update [&lt;dep&gt;...]
 
@@ -152,6 +184,33 @@ Commands other than `init` work from any subdirectory: cppm walks up to find `cp
 | `CPPM_CACHE_DIR` | relocate the global source cache (default `~/.cache/cppm`) |
 | `CPPM_RECIPES_DIR` | extra recipe directory; overrides the built-in database |
 | `CXX` | consulted when detecting a compiler |
+
+## Test frameworks always get --dev
+
+A test framework added without `--dev` is linked into every target, including the one that ships:
+
+```sh
+cppm add github:catchorg/Catch2@v3.7.1 --dev --non-interactive   # right
+cppm add github:catchorg/Catch2@v3.7.1 --non-interactive         # wrong
+```
+
+This applies to Catch2, googletest, doctest and benchmark.
+
+A `--dev` dependency is linked into the targets marked `"test": true` in `cppm.json` — nothing else.
+If the project has no such target, `cppm add --dev` says so; add one with
+`cppm init --with-tests`, or mark an existing target by hand in `cppm.json` and run `cppm sync`:
+
+```json
+"targets": {
+  "MyApp_tests": { "kind": "executable", "sources": ["tests/MyApp_test.cpp"], "test": true }
+}
+```
+
+Marking it is not cosmetic: that declaration is the only thing that routes dev dependencies to the
+target. cppm never infers it from a name like `foo_tests`.
+
+Writing a test target into `CMakeLists.txt` by hand is fine — anything registered with `add_test()`
+is run — but that target will not receive dev dependencies unless `cppm.json` also declares it.
 
 ## Two rules that decide whether you use cppm correctly
 
@@ -235,6 +294,7 @@ cppm already knows the right options for ~25 common libraries, so this is usuall
 | `cppm.json` | you | yes |
 | `cppm.lock` | cppm | yes — it pins commits for reproducible builds |
 | `CMakeLists.txt` | **you** | yes — cppm never rewrites it |
+| `tests/` | you | yes — scaffolded by `--with-tests`, then yours |
 | `CMakePresets.json` | cppm | yes |
 | `.cppm/`, `build/` | cppm | no, git-ignored |
 
@@ -250,3 +310,6 @@ Never edit `.cppm/generated/cppm.cmake`; it is regenerated on every sync.
 | compiler change not taking effect | `cppm build` detects it and reconfigures; else `cppm build --clean` |
 | standard rejected | `cppm doctor` reports whether your compiler supports it |
 | hangs with no output | a prompt is waiting — rerun with `--non-interactive` |
+| `cppm test` says the project has no tests | `cppm init --with-tests`, or add `add_test()` to `CMakeLists.txt` |
+| undefined references to Catch2 in a test | the target is not marked `"test": true` in `cppm.json` |
+| a dev dependency appears in a release binary | it was added without `--dev`; add `"dev": true` and `cppm sync` |

@@ -21,8 +21,9 @@ The headline feature set, and the one with the clearest payoff. Everything here 
 **cppm builds for you**: catching undefined behaviour, memory errors and data races in your own C++,
 with the configuration already written.
 
-The theme: cppm can build your project but cannot yet *run* anything, which blocks every form of
-checking. Everything below depends on the first item.
+The theme was that cppm could build your project but could not *run* anything, which blocked every
+form of checking: every item below is, at bottom, "run the tests under X". **0.2.1 and 0.2.2 have
+landed**, so that blocker is gone and the rest of this section is now unblocked work.
 
 The checks stack, cheapest first — a project should adopt them in this order:
 
@@ -39,7 +40,14 @@ Each of those is both a local command and a **CI stage** (0.2.8). One declaratio
 drives the local preset and the generated pipeline, so a check cannot pass on your machine and fail
 in CI because two files drifted apart.
 
-### 0.2.1 `cppm test` — a CTest wrapper
+The stack is also why the `checks` block in 0.2.8 is a **closed set** of names cppm knows, not a
+place to plug in an arbitrary external tool. cppm's value in each row above is the gotchas it
+encodes — ASan and TSan are mutually exclusive, never run an instrumented binary under valgrind,
+`CMAKE_CXX_CLANG_TIDY` leaks into dependencies — and it cannot know those for a tool named at
+runtime. A generic step runner would remove no CMake knowledge, which is this document's bar for
+inclusion.
+
+### 0.2.1 `cppm test` — a CTest wrapper — **done**
 
 Prerequisite for the rest. Thin, like `cppm build`:
 
@@ -47,15 +55,38 @@ Prerequisite for the rest. Thin, like `cppm build`:
 cppm test                 # ctest --preset debug
 cppm test --release
 cppm test --filter <re>   # ctest -R
-cppm test --verbose       # ctest --output-on-failure
+cppm test --verbose
 cppm test --list
+cppm test --no-build      # trust the existing build tree
+cppm test --fail-fast     # ctest --stop-on-failure
 ```
 
-Generated projects gain `include(CTest)` and `enable_testing()` in the managed include, and
-`CMakePresets.json` gains `testPresets`. `cppm init --with-tests` scaffolds a `tests/` directory
-and a first test file.
+Generated projects gain `include(CTest)` in the managed include, `CMakePresets.json` gains
+`testPresets` with `outputOnFailure` on, and `cppm init --with-tests` scaffolds a `tests/`
+directory, a first test and the `add_test()` wiring.
 
-### 0.2.2 Dev-only dependencies — *a real gap today*
+What was learned building it, because it shaped the design:
+
+- **`include(CTest)` must come after the dependencies.** It defines `BUILD_TESTING` and defaults it
+  to `ON`, and a great many libraries build their own test suites when that is set. Emitting it
+  before `FetchContent_MakeAvailable()` is the same failure as emitting cache options after
+  `FetchContent_Declare` — constraint 7 with a different trigger. The managed include also forces
+  `BUILD_TESTING` off across the dependency section (a plain variable, so dependencies'
+  `option(BUILD_TESTING ...)` calls become no-ops under CMP0077) and restores it afterwards.
+- **`include(CTest)`, not a bare `enable_testing()`.** The module writes the
+  `DartConfiguration.tcl` that `ctest -T memcheck` reads, which 0.2.6 needs.
+- **It is guarded by `PROJECT_IS_TOP_LEVEL`**, so a cppm project consumed through
+  `add_subdirectory` does not switch testing on in its parent.
+- **`cppm test` builds first.** A test run against a stale build tree reports on code that is no
+  longer there, which is worse than no result; `--no-build` opts out.
+- **`ctest` exits 8 on "No tests were found"**, which reads as a build failure. cppm counts the
+  tests first and says what to do instead — and distinguishes "this project has no tests" from
+  "your `--filter` matched none of them", because the remedies differ.
+- **The scaffolded suite uses no framework.** `init` has to work offline and before any dependency
+  exists, so the first test compiles against nothing but the standard library. CTest judges a test
+  by its exit status, so that is the whole protocol.
+
+### 0.2.2 Dev-only dependencies — **done**
 
 Catch2, googletest, doctest and benchmark are test-only, but `cppm add` currently links every
 dependency to every target. That bloats release builds with test frameworks.
@@ -71,8 +102,24 @@ cppm add github:catchorg/Catch2@v3.7.1 --dev
 ```
 
 A `dev` dependency is fetched and made available but linked only to test targets, and
-`cppm_link_dependencies` skips it. This has to land with or before 0.2.1, or the test story is
-wrong from the start.
+`cppm_link_dependencies` skips it. This had to land with or before 0.2.1, or the test story would
+have been wrong from the first release.
+
+How it ended up working, and why:
+
+- `CPPM_DEPENDENCIES` holds the dependencies that ship; dev ones are tracked in
+  `_cppm_dev_dependencies` instead. Existing projects have no dev dependencies, so this changes
+  nothing for them — which is what keeps it inside constraint 3.
+- A target carries `"test": true` in `cppm.json`, and `cppm_link_dependencies()` adds the dev
+  dependencies when linking one. That is the only way `cppm add --dev` can take effect at all:
+  cppm does not edit `CMakeLists.txt` after `init`, so it cannot add a link line there.
+- `"test": true` is **declared, never inferred**. cppm does not decide that a target called
+  `foo_tests` is a test: guessing wrong either leaks a framework into a release binary or leaves a
+  test unlinked.
+- A dev dependency listed on a non-test target is a manifest validation error naming both possible
+  edits, not a warning.
+- `--target` now also applies to `local:` dependencies. It was documented for `add` but
+  `addPath` never consulted it, so a local library's target name could not be pinned at all.
 
 ### 0.2.3 Warnings and hardening — the cheapest safety there is
 
@@ -404,10 +451,14 @@ under ASan" is a question people have today, whereas the transitive-pinning gap 
 it bites. And 0.3.1 is the one item that could still invalidate architecture, so it benefits from
 the project being otherwise settled before it is attempted.
 
-Within 0.2, the order is forced: **dev-dependencies (0.2.2) must land with or before `cppm test`
+Within 0.2, the order was forced: **dev-dependencies (0.2.2) had to land with or before `cppm test`
 (0.2.1)**, because a test command that links Catch2 into your release binary is wrong from the first
-release and becomes a breaking change to fix later.
+release and becomes a breaking change to fix later. Both are now done.
 
-After that, 0.2.3 (warnings and hardening) is the best value per hour of work: no runtime cost, no
-new concepts for the user, and it catches more real bugs than any single sanitizer. Sanitizers and
-valgrind are more impressive but find a narrower class of problem more slowly.
+**Next is 0.2.3, warnings and hardening.** It is the best value per hour of work: no runtime cost,
+no new concepts for the user, and it catches more real bugs than any single sanitizer. Sanitizers
+and valgrind are more impressive but find a narrower class of problem more slowly.
+
+0.2.3 is also now cheap to verify, which it was not before: `cppm test` means a warning level can
+be asserted against a project that actually builds and runs, rather than only against the text of
+the generated CMake.

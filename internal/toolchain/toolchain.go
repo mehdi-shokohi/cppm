@@ -210,3 +210,8 @@ func filepathBase(p string) string {
 	}
 	return p
 }
+
+// CTest is CMake's test driver. It ships with CMake, so a missing ctest beside
+// a present cmake means a broken installation rather than a missing optional
+// tool.
+func CTest() Tool { return Find("ctest") }

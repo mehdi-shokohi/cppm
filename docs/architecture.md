@@ -183,7 +183,7 @@ MyProject/
 ├── CMakeLists.txt     targets, project()          YOU      committed, never rewritten
 ├── CMakePresets.json  compiler, generator, types  cppm     committed, rewritten by sync
 ├── CMakeUserPresets.json  your own presets        YOU      never touched
-├── src/ include/
+├── src/ include/ tests/
 ├── .cppm/generated/cppm.cmake                     cppm     git-ignored, rewritten by sync
 └── build/<preset>/                                cppm     git-ignored
 ```
@@ -204,9 +204,21 @@ migrate them later**. The surface is deliberately four names:
 | `.cppm/generated/cppm.cmake` | the include path |
 | `cppm_link_dependencies(<target> [deps...])` | linking entry point |
 | `CPPM_TARGETS_<dep>` | one dependency's targets, for manual wiring |
-| `CPPM_DEPENDENCIES` | all dependency names |
+| `CPPM_DEPENDENCIES` | the dependency names that ship |
 
 Everything else is prefixed `_cppm_` to mark it private, and a test enforces that.
+
+Dev-only dependencies are the one case where this surface had to absorb a new concept, and how it
+was done is worth recording. `CPPM_DEPENDENCIES` excludes them, and they live in the private
+`_cppm_dev_dependencies` instead; `cppm_link_dependencies()` adds them when the target it is
+linking appears in the private `_cppm_test_targets`, which is rendered from the `"test": true`
+targets in `cppm.json`. No public name changed and no new public name was added, and a project with
+no dev dependencies generates the same linking behaviour as before.
+
+That indirection is not decoration. cppm cannot edit `CMakeLists.txt` after `init`, so if linking a
+dev dependency required a new line in that file, `cppm add --dev` could not work at all — the
+dependency would be fetched and then linked to nothing. Routing it through the generated function is
+the only mechanism available.
 
 ---
 

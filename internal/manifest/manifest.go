@@ -159,6 +159,15 @@ type Target struct {
 	Kind         string   `json:"kind"`
 	Sources      []string `json:"sources"`
 	Dependencies []string `json:"dependencies,omitempty"`
+
+	// Test marks the target as a test executable: `cppm init --with-tests`
+	// registers it with add_test(), and it is the only kind of target a dev
+	// dependency may be linked into.
+	//
+	// This is a declaration, not an inference. cppm never guesses that a target
+	// called "foo_tests" is a test, because being wrong either leaks a test
+	// framework into a release binary or leaves a test unlinked.
+	Test bool `json:"test,omitempty"`
 }
 
 // Dependency is one entry in the dependencies map.
@@ -172,6 +181,15 @@ type Dependency struct {
 	Version string            `json:"version,omitempty"`
 	Targets []string          `json:"targets,omitempty"`
 	Options map[string]string `json:"options,omitempty"`
+
+	// Dev marks a dependency needed only to build and run the tests: Catch2,
+	// googletest, doctest, benchmark.
+	//
+	// It is still fetched and made available, so CPPM_TARGETS_<dep> works, but
+	// it is left out of CPPM_DEPENDENCIES. That is what stops
+	// cppm_link_dependencies() with no argument list from linking a test
+	// framework into a release binary.
+	Dev bool `json:"dev,omitempty"`
 }
 
 // Manifest is the whole of cppm.json. Field order here is the serialised order.
@@ -330,8 +348,18 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("target %q: at least one source is required", name)
 		}
 		for _, d := range t.Dependencies {
-			if _, ok := m.Dependencies[d]; !ok {
+			dep, ok := m.Dependencies[d]
+			if !ok {
 				return fmt.Errorf("target %q depends on %q, which is not in dependencies", name, d)
+			}
+			// Catching this here is the whole point of the dev flag: a test
+			// framework listed on a shipping target is a release binary with
+			// Catch2 compiled into it.
+			if dep.Dev && !t.Test {
+				return fmt.Errorf("target %q depends on %q, which is marked \"dev\": true in cppm.json.\n"+
+					"a dev dependency may only be linked into a test target. Either add \"test\": true to\n"+
+					"targets.%s, or remove \"dev\": true from dependencies.%s to link it everywhere",
+					name, d, name, d)
 			}
 		}
 	}
@@ -368,6 +396,28 @@ func (m *Manifest) DependencyNames() []string {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	return names
+}
+
+// DevDependencyNames returns the dev-only dependency names, in order.
+func (m *Manifest) DevDependencyNames() []string {
+	var names []string
+	for _, n := range m.DependencyNames() {
+		if m.Dependencies[n].Dev {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// TestTargetNames returns the names of targets marked "test": true, in order.
+func (m *Manifest) TestTargetNames() []string {
+	var names []string
+	for _, n := range m.TargetNames() {
+		if m.Targets[n].Test {
+			names = append(names, n)
+		}
+	}
 	return names
 }
 

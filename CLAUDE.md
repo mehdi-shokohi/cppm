@@ -36,7 +36,8 @@ These are not style preferences. Breaking one is a bug even if the tests pass.
 3. **Never change the generated CMake public interface** — `cppm_link_dependencies`,
    `CPPM_TARGETS_<dep>`, `CPPM_DEPENDENCIES`, or the include path. These live inside a user-owned
    file cppm promised not to rewrite, so they can never be migrated. New variables get a `_cppm_`
-   prefix.
+   prefix. If a new feature seems to need a new public name, route it through
+   `cppm_link_dependencies` instead — that is how dev dependencies work.
 4. **Never add version parsing, comparison or ranges.** A version is an opaque git ref. This is
    declined scope, not a missing feature: it is what lets libraries that ignore semver work.
 5. **Never use a shell.** `exec.Command` with an argv slice. Reject arguments beginning with `-`
@@ -44,7 +45,9 @@ These are not style preferences. Breaking one is a bug even if the tests pass.
 6. **Never let `sync` move a pin.** Only `update` re-resolves. Getting this wrong destroys
    reproducibility silently.
 7. **Emit cache options before `FetchContent_Declare`.** They are inert afterwards, and the result
-   is every dependency building its own test suite.
+   is every dependency building its own test suite. `BUILD_TESTING` is the same hazard by another
+   route: `include(CTest)` defaults it to `ON`, so it is emitted *after* the dependencies and forced
+   off across them.
 8. **Prefer declining to guessing.** A confidently wrong link target produces a build that
    configures, links, and is silently wrong. In discovery, `WRONG == 0` matters more than the hit
    rate.
@@ -76,7 +79,7 @@ The constraint is usually the point.
 | `internal/discover` | scan, resolve variables, veto, rank, confidence gate |
 | `internal/recipes` | embedded curated database + user overrides |
 | `internal/cmakegen` | the CMakeLists template and the managed include |
-| `internal/toolchain` | locates and runs cmake/ninja/git/compiler |
+| `internal/toolchain` | locates and runs cmake/ctest/ninja/git/compiler |
 | `internal/e2e` | drives the real binary against real CMake |
 
 ## Commit messages

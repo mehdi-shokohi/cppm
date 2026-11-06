@@ -267,7 +267,56 @@ func projectChecks() []check {
 		out = append(out, check{"presets", statusOK, "CMakePresets.json (cppm-generated)", ""})
 	}
 
+	out = append(out, testingChecks(p)...)
 	out = append(out, toolchainRequestChecks(p)...)
 	out = append(out, driftChecks(p)...)
+	return out
+}
+
+// testingChecks reports a test setup that is declared but not wired up.
+//
+// Both halves live in files cppm cannot reconcile on its own: the "test": true
+// declaration is in cppm.json, and the add_test() call is in the user-owned
+// CMakeLists.txt. When they disagree the symptom is a dev dependency that is
+// fetched and linked to nothing, or a test that never runs -- neither of which
+// produces an error anywhere.
+func testingChecks(p *project.Project) []check {
+	var out []check
+
+	dev := p.Manifest.DevDependencyNames()
+	tests := p.Manifest.TestTargetNames()
+
+	if len(dev) > 0 && len(tests) == 0 {
+		out = append(out, check{"dev dependencies", statusWarn,
+			fmt.Sprintf("%s are dev-only, but no target is marked \"test\": true", strings.Join(dev, ", ")),
+			"they are fetched and linked to nothing; mark a test target in cppm.json and run 'cppm sync'"})
+		return out
+	}
+	if len(tests) == 0 {
+		return nil
+	}
+
+	// add_test() lives in CMakeLists.txt, so cppm can only look.
+	b, err := os.ReadFile(p.CMakeListsPath())
+	if err != nil {
+		return out
+	}
+	var unregistered []string
+	for _, name := range tests {
+		if !strings.Contains(string(b), "add_test(NAME "+name+" ") {
+			unregistered = append(unregistered, name)
+		}
+	}
+	if len(unregistered) > 0 {
+		out = append(out, check{"test targets", statusWarn,
+			fmt.Sprintf("%s declared in cppm.json but not registered with CTest", strings.Join(unregistered, ", ")),
+			fmt.Sprintf("add to CMakeLists.txt: add_test(NAME %s COMMAND %s)", unregistered[0], unregistered[0])})
+	} else {
+		detail := fmt.Sprintf("%s registered with CTest", strings.Join(tests, ", "))
+		if len(dev) > 0 {
+			detail += fmt.Sprintf("; dev dependencies %s link there", strings.Join(dev, ", "))
+		}
+		out = append(out, check{"test targets", statusOK, detail, ""})
+	}
 	return out
 }

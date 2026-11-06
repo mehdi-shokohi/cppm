@@ -46,6 +46,7 @@ func init() {
 	register(cmdUpdate())
 	register(cmdSync())
 	register(cmdBuild())
+	register(cmdTest())
 	register(cmdList())
 	register(cmdInfo())
 	register(cmdDoctor())
