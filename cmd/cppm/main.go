@@ -7,7 +7,7 @@ package main
 import (
 	"os"
 
-	"cppm/internal/cli"
+	"github.com/mehdi-shokohi/cppm/internal/cli"
 )
 
 // version is overridden at release time with -ldflags "-X main.version=..."

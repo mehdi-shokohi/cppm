@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"cppm/internal/atomicfile"
+	"github.com/mehdi-shokohi/cppm/internal/atomicfile"
 )
 
 // FileName is the lockfile's fixed name, a sibling of cppm.json.

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"cppm/internal/lockfile"
-	"cppm/internal/manifest"
-	"cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/lockfile"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/project"
 )
 
 func cmdList() *Command {
@@ -165,11 +165,4 @@ func sortedMapKeys(m map[string]string) []string {
 		}
 	}
 	return out
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

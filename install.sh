@@ -1,7 +1,7 @@
 #!/bin/sh
 # cppm installer for Linux and macOS.
 #
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/cppm/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/mehdi-shokohi/cppm/main/install.sh | sh
 #
 # Downloads the release binary for this platform, verifies its checksum, and
 # installs it. Builds from source instead when --from-source is given or no
@@ -12,7 +12,7 @@
 
 set -eu
 
-REPO="${CPPM_REPO:-OWNER/cppm}"
+REPO="${CPPM_REPO:-mehdi-shokohi/cppm}"
 VERSION="${CPPM_VERSION:-latest}"
 FROM_SOURCE=0
 

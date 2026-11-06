@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"cppm/internal/cmakegen"
-	"cppm/internal/lockfile"
-	"cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/cmakegen"
+	"github.com/mehdi-shokohi/cppm/internal/lockfile"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
 )
 
 // DirName is the cppm-owned directory. Everything inside it is generated or

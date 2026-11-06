@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"cppm/internal/cmakegen"
+	"github.com/mehdi-shokohi/cppm/internal/cmakegen"
 )
 
 // Version is cppm's own version, stamped into generated files and the lockfile.

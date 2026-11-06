@@ -8,7 +8,7 @@
     release asset matches.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/OWNER/cppm/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/mehdi-shokohi/cppm/main/install.ps1 | iex
 
 .EXAMPLE
     .\install.ps1 -Version v0.1.0 -InstallDir C:\tools
@@ -16,7 +16,7 @@
 [CmdletBinding()]
 param(
     [string]$Version    = $(if ($env:CPPM_VERSION) { $env:CPPM_VERSION } else { 'latest' }),
-    [string]$Repo       = $(if ($env:CPPM_REPO)    { $env:CPPM_REPO }    else { 'OWNER/cppm' }),
+    [string]$Repo       = $(if ($env:CPPM_REPO)    { $env:CPPM_REPO }    else { 'mehdi-shokohi/cppm' }),
     [string]$InstallDir = $(if ($env:CPPM_INSTALL_DIR) { $env:CPPM_INSTALL_DIR } else { "$env:LOCALAPPDATA\cppm\bin" }),
     [switch]$FromSource
 )

@@ -20,8 +20,8 @@ import (
 	"sort"
 	"strings"
 
-	"cppm/internal/lockfile"
-	"cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/lockfile"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
 )
 
 // DoNotEditBanner heads every generated file.

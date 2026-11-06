@@ -14,19 +14,19 @@ cppm build
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/cppm/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mehdi-shokohi/cppm/main/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/OWNER/cppm/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mehdi-shokohi/cppm/main/install.ps1 | iex
 ```
 
 With Go installed:
 
 ```sh
-go install github.com/OWNER/cppm/cmd/cppm@latest
+go install github.com/mehdi-shokohi/cppm/cmd/cppm@latest
 ```
 
 Both installers verify the release checksum, fall back to building from source when no prebuilt
@@ -229,12 +229,24 @@ Run `cppm doctor` to check all of them.
 ## Build from source
 
 ```bash
-git clone https://github.com/OWNER/cppm && cd cppm
+git clone https://github.com/mehdi-shokohi/cppm && cd cppm
 go build -o cppm ./cmd/cppm
 go test ./...
 ```
 
-Needs Go 1.25+. **No third-party Go dependencies** — stdlib only, so `go build` works offline.
+Needs Go 1.23+. **No third-party Go dependencies** — stdlib only, so `go build` works offline.
+
+## AI assistant skill
+
+[`skills/cppm/`](skills/cppm/) is a skill that teaches an AI coding assistant to drive the cppm CLI
+correctly — the full command reference, and the mistakes it would otherwise make, such as
+hand-writing `FetchContent` instead of running `cppm add`. Install it with:
+
+```sh
+mkdir -p ~/.claude/skills && cp -r skills/cppm ~/.claude/skills/
+```
+
+See [skills/README.md](skills/README.md) for other assistants and per-project installs.
 
 ## Contributing
 

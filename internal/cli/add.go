@@ -9,12 +9,12 @@ import (
 	"strconv"
 	"strings"
 
-	"cppm/internal/discover"
-	"cppm/internal/lockfile"
-	"cppm/internal/manifest"
-	"cppm/internal/project"
-	"cppm/internal/recipes"
-	"cppm/internal/vcs"
+	"github.com/mehdi-shokohi/cppm/internal/discover"
+	"github.com/mehdi-shokohi/cppm/internal/lockfile"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/recipes"
+	"github.com/mehdi-shokohi/cppm/internal/vcs"
 )
 
 type addOpts struct {

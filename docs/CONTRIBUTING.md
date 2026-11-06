@@ -12,13 +12,13 @@ back to one of those.
 ## Getting set up
 
 ```bash
-git clone https://github.com/OWNER/cppm
+git clone https://github.com/mehdi-shokohi/cppm
 cd cppm
 go build -o cppm ./cmd/cppm
 go test ./...
 ```
 
-You need **Go 1.25+**. To run the full test suite you also need **CMake 3.24+**, **Git**, a **C++
+You need **Go 1.23+**. To run the full test suite you also need **CMake 3.24+**, **Git**, a **C++
 compiler**, and ideally **Ninja**. `./cppm doctor` checks all of them.
 
 ### cppm has no third-party Go dependencies, and should not gain any

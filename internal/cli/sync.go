@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"strings"
 
-	"cppm/internal/atomicfile"
-	"cppm/internal/cmakegen"
-	"cppm/internal/lockfile"
-	"cppm/internal/manifest"
-	"cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/atomicfile"
+	"github.com/mehdi-shokohi/cppm/internal/cmakegen"
+	"github.com/mehdi-shokohi/cppm/internal/lockfile"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/project"
 )
 
 func cmdSync() *Command {

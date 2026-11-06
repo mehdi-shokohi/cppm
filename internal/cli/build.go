@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"cppm/internal/project"
-	"cppm/internal/toolchain"
+	"github.com/mehdi-shokohi/cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/toolchain"
 )
 
 type buildOpts struct {

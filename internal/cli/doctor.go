@@ -5,10 +5,10 @@ import (
 	"os"
 	"strings"
 
-	"cppm/internal/cmakegen"
-	"cppm/internal/manifest"
-	"cppm/internal/project"
-	"cppm/internal/toolchain"
+	"github.com/mehdi-shokohi/cppm/internal/cmakegen"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/toolchain"
 )
 
 type check struct {

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"cppm/internal/lockfile"
-	"cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/lockfile"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
 )
 
 func sampleLock() *lockfile.Lock {

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"cppm/internal/manifest"
-	"cppm/internal/project"
-	"cppm/internal/vcs"
+	"github.com/mehdi-shokohi/cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/vcs"
 )
 
 // Resolution is vcs.Resolution, aliased for brevity in this file.

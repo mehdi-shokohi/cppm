@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"cppm/internal/atomicfile"
+	"github.com/mehdi-shokohi/cppm/internal/atomicfile"
 )
 
 // FileName is the manifest's fixed name, found by walking up from the cwd.

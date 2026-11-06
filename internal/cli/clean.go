@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/project"
 )
 
 func cmdClean() *Command {

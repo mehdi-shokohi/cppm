@@ -24,7 +24,7 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(dir)
 
 	cppmBin = filepath.Join(dir, "cppm")
-	build := exec.Command("go", "build", "-o", cppmBin, "cppm/cmd/cppm")
+	build := exec.Command("go", "build", "-o", cppmBin, "github.com/mehdi-shokohi/cppm/cmd/cppm")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		panic("building cppm for e2e tests: " + err.Error())

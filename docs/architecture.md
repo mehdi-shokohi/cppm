@@ -3,7 +3,7 @@
 How cppm is put together, and why it is put together that way. For using cppm, see the
 [README](../README.md); for working on it, [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Implementation: **Go 1.27+** · Generates: **CMake 3.24+** · Backend: **Ninja** when available
+Implementation: **Go 1.23+** · Generates: **CMake 3.24+** · Backend: **Ninja** when available
 
 ---
 
