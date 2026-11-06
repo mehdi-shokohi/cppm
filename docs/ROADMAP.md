@@ -39,6 +39,11 @@ in `v0.2.2`**, so that blocker is gone and the rest of this section is now unblo
 Tags follow this numbering rather than a semver patch series: `v0.2.2` means "roadmap items through
 0.2.2 are in", and there was no `v0.2.0` or `v0.2.1`.
 
+Because a tag names a roadmap item, the scheme leaves no room for a release that ships only fixes:
+a `v0.2.3` tag would assert that item 0.2.3 is in. Fix releases therefore take a fourth component.
+`v0.2.2.1` reads as "`v0.2.2` plus fixes, no new roadmap item". They are recorded under
+[Fix releases](#fix-releases) and never change an item's status.
+
 The checks stack, cheapest first — a project should adopt them in this order:
 
 ```
@@ -210,6 +215,14 @@ Constraints the tool must encode, not leave to be discovered:
 - **TSan needs everything instrumented.** Partially instrumented code yields false positives.
   Because dependencies are built in the same tree, cppm's flags reach them automatically — another
   point in the design's favour.
+- **A dependency can overrule those flags, and one already does.** duckdb appends its own
+  `-fsanitize=address -fsanitize=undefined` to `CMAKE_CXX_FLAGS_DEBUG`, because its `ENABLE_SANITIZER`
+  and `ENABLE_UBSAN` both default ON. So `--sanitize=tsan` against a default duckdb puts ASan and
+  TSan in one translation unit and the compiler rejects it — the exact failure the bullet above
+  promises to turn into a clear error, arriving *after* cppm's own check has passed. Reaching a
+  dependency is not the same as having the last word on it. This preset set is not done until
+  cppm detects dependency-injected sanitizer flags and names the option to turn them off, and until
+  it has been exercised against a dependency that writes `CMAKE_CXX_FLAGS_<CONFIG>` itself.
 - **ASan includes LeakSanitizer on Linux but not macOS.** On macOS it needs
   `ASAN_OPTIONS=detect_leaks=1` and is unreliable; `doctor` should say so rather than silently
   differing.
@@ -411,6 +424,65 @@ Two dependencies each defining `uninstall` or `docs` is a hard configure failure
 workaround. cppm cannot fix it, but it can recognise the error and explain the cause instead of
 leaving the user with a raw CMake message.
 
+### 0.3.5 Harvest the dependency's own `option()` declarations
+
+The generic `BUILD_TESTING` guard (constraint 7) covers far less than it appears to. Measured
+against the recipe database itself: of 25 libraries with a recorded test or example switch, **3 use
+`BUILD_TESTING` and 22 invent their own name** — `FMT_TEST`, `JSON_BuildTests`, `PYBIND11_TEST`,
+`RE2_BUILD_TESTING`, `BUILD_UNITTESTS`. So the guard reaches roughly an eighth of the ecosystem and
+the recipe database has been silently carrying the rest. The first uncurated dependency added to a
+project falls straight through it.
+
+`discover` already reads every CMake file in the tree; it just never looks at `option()`. A second
+pass collecting `option(<NAME> "<doc>" <default>)`, filtered to names matching a conservative
+pattern (`TEST`, `TESTS`, `TESTING`, `UNITTEST`, `EXAMPLE`, `BENCHMARK`, `DOC`, `SHELL`, `INSTALL`,
+`SANITIZER`, `UBSAN`) **whose default is ON**, recovers what a recipe author writes by hand. For
+duckdb it finds exactly the four that matter.
+
+The suppressions must be **written into `cppm.json`, not applied invisibly**. That keeps the
+"decline rather than guess" posture — the user sees each one and can delete it — and makes a wrong
+guess show up in a diff instead of buried in generated CMake. It also raises the floor for every
+uncurated library without adding a single recipe.
+
+### 0.3.6 Say when a dependency is uncurated
+
+`cppm add` reports the same success for a curated library and an uncurated one. fmt arrives with a
+verified target and three options from its recipe; duckdb arrived with no target, no options, and
+the same cheerful summary. That symmetry is what makes the first off-recipe dependency a bad
+afternoon rather than a warning.
+
+An uncurated dependency with no exported namespace should say so: that the target name was guessed
+from CMake, that nothing is known about the options it needs, and that `cppm.json` will probably
+need adjusting. Pair it with a `cppm recipe --export <dep>` that prints a contributable entry, which
+is the only way a 26-entry database becomes a 200-entry one. Costs no schema change.
+
+### 0.3.7 `doctor` should audit dependencies, not just tools
+
+`doctor` checks the toolchain and the project's own settings and has no opinion about the
+dependencies, which is where the risk actually sits. Four static checks, all cheap, all from the
+already-cached source:
+
+- **Assumes it is top-level** — `CMAKE_SOURCE_DIR` or `CMAKE_BINARY_DIR` where `PROJECT_*` was
+  meant. This is what broke duckdb: its test tree resolved sources against the *consumer's* root.
+  It generalises to output directories and install rules landing in the user's tree.
+- **Exports no include path** — no `target_include_directories` on the linked target. True of
+  duckdb, zlib and rapidjson.
+- **Injects its own flags** — writes `CMAKE_CXX_FLAGS`, `CMAKE_CXX_FLAGS_<CONFIG>`, or calls
+  `add_compile_options`. Feeds 0.2.5.
+- **`option()` defaults still ON** that 0.3.5 would have caught.
+
+### 0.3.8 Include directories through `cppm_link_dependencies`
+
+Three of 26 recipes end with some form of "add the include directory yourself" — duckdb, zlib,
+rapidjson — because a library can publish headers with a directory-scoped `include_directories()`
+and leave the linked target carrying no include path. cppm can only hand over link targets, so the
+user has to hand-edit `CMakeLists.txt`, the one file cppm promises never to touch.
+
+An `includeDirs` field on the recipe and the manifest, emitted inside `cppm_link_dependencies`, is
+the fix, and constraint 3 already names that function as the route for exactly this kind of
+addition. The only item in this section that changes a committed file format, so it needs deciding
+rather than just doing.
+
 ---
 
 ## v0.4 — Platform parity
@@ -425,6 +497,41 @@ leaving the user with a raw CMake message.
 
 ---
 
+## Fix releases
+
+Releases that ship only fixes. A fourth tag component, because a third would name a roadmap item
+that has not shipped. These never move an item's status in the tables above.
+
+### `v0.2.2.1`
+
+Found by adding duckdb to a real project — the first dependency used that has no recipe. Four
+independent failures, each hidden behind the previous, so only the first was visible.
+
+- **Discovery could recommend a target that does not exist.** `duckdb::cpp_api` is the only
+  namespaced alias in duckdb's tree and it is defined in `tools/cpp/cmake/DuckDBCppApi.cmake`, a
+  module for the packaged release, included only from a directory nothing adds as a subdirectory.
+  The scanner read every `*.cmake` without asking whether the build reaches it, and the namespaced
+  and alias bonuses then floated that file to the top: `Best=duckdb::cpp_api`, `Confident=true`,
+  for a name no FetchContent build defines. A confident wrong answer is the one outcome discovery
+  may not produce (constraint 8), and the better a library's packaging, the more likely it was —
+  a packaging module is exactly where the tidy `ns::name` alias lives.
+
+  `discover` now walks `add_subdirectory()` and `include()` from the top-level `CMakeLists.txt` and
+  demotes targets only unreachable files define. It demotes rather than drops, because the walk is
+  approximate and a target wrongly judged unreachable should lose on score, not vanish; and it is
+  skipped entirely when no candidate is reachable, which means the walk failed rather than that the
+  library has no targets. duckdb now ranks `duckdb` first and reports `Ambiguous`, so cppm asks.
+- **A duckdb recipe**, carrying the four options the library needs and a note covering the two
+  things no option can fix: that its headers need adding by hand, and that `<duckdb.h>` is the C
+  API while `<duckdb.hpp>` is C++.
+
+Not fixed here, and the reason 0.3.5 through 0.3.8 exist: the generic test-suppression guard misses
+duckdb's `BUILD_UNITTESTS` entirely; duckdb's test tree resolves sources against the consumer's
+root, which is upstream's bug but cppm's configure failure; the include path cannot be expressed at
+all; and its Debug sanitizers break any consumer not built the same way.
+
+---
+
 ## Maintaining cppm
 
 Separate from everything above: this is cppm's **own** Go test suite, not a user-facing feature.
@@ -432,9 +539,9 @@ Nothing here affects projects built with cppm.
 
 | Item | Why |
 |---|---|
-| **Recipe smoke matrix in CI, nightly** | Recipes rot silently: a library renames a target or re-points a tag and the recipe becomes wrong. A scheduled job that adds and builds every recipe's library is the only way to notice. |
+| **Recipe smoke matrix in CI, nightly** | Recipes rot silently: a library renames a target or re-points a tag and the recipe becomes wrong. A scheduled job that adds and builds every recipe's library is the only way to notice. Scope it as *configure every recipe, build a sampled subset*: a Debug duckdb alone is ~175 targets and several minutes, so "build them all" would make this the longest job in the repo. |
 | **Fuzz the spec parser** | `go test -fuzz` on `vcs.ParseSpec`. It takes untrusted input and feeds it to git, so it is the highest-value fuzz target. |
-| **Discovery regression corpus** | Keep the measured library set as fixtures, and assert the confidently-wrong count stays at zero — that is the metric that matters, not the hit rate. |
+| **Discovery regression corpus** | Keep the measured library set as fixtures, and assert the confidently-wrong count stays at zero — that is the metric that matters, not the hit rate. Started: duckdb is the first recorded confidently-wrong case, kept at zero by the reachability rule in `v0.2.2.1`. |
 | **Golden-file tests for generated CMake** | Makes every change to generated output visible in review instead of inferred. |
 | **Coverage gate** | Report now, enforce a floor once it has settled. |
 | **Full `-race`** | CI currently runs `-race -short`; the network and build paths are not covered. |

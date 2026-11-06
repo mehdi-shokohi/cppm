@@ -238,3 +238,79 @@ add_library(libx INTERFACE)
 		}
 	}
 }
+
+// duckdb, reduced to the shape that mattered: the only namespaced alias in the
+// tree lives in a module written for the packaged release, included from a
+// directory nothing adds. Reading every *.cmake made that alias outrank the
+// real target with full confidence, and the name does not exist in a
+// FetchContent build -- a confident wrong answer, which is the one outcome
+// discovery may not produce.
+func TestIgnoresTargetsFromUnreachableCMakeFiles(t *testing.T) {
+	root := tree(t, map[string]string{
+		"CMakeLists.txt": `
+project(DuckDB)
+add_subdirectory(src)
+add_subdirectory(tools)
+`,
+		"src/CMakeLists.txt": `
+add_library(duckdb SHARED ${ALL_OBJECT_FILES})
+`,
+		"tools/CMakeLists.txt": `
+add_subdirectory(cpp)
+`,
+		// Reachable, and so still a candidate -- just not the best one.
+		"tools/cpp/CMakeLists.txt": `
+add_library(duckdb_cpp_api STATIC duckdb_cpp.cpp)
+`,
+		// Unreachable: only tools/cpp/package/ includes it, and no
+		// add_subdirectory() names that directory.
+		"tools/cpp/cmake/DuckDBCppApi.cmake": `
+add_library(duckdb_cpp_api STATIC "${DUCKDB_CPP_DIR}/duckdb_cpp.cpp")
+add_library(duckdb::cpp_api ALIAS duckdb_cpp_api)
+`,
+		"tools/cpp/package/CMakeLists.txt": `
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/DuckDBCppApi.cmake")
+`,
+	})
+	res, err := Scan(root, "duckdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Best != "duckdb" {
+		t.Errorf("Best = %q, want duckdb", res.Best)
+	}
+	// Demoted, not hidden: the walk is approximate, so the user still gets to
+	// see the name and pick it.
+	var alias *Candidate
+	for i := range res.Candidates {
+		if res.Candidates[i].Name == "duckdb::cpp_api" {
+			alias = &res.Candidates[i]
+		}
+	}
+	if alias == nil {
+		t.Fatal("duckdb::cpp_api should still be listed as a candidate")
+	}
+	if alias.Score >= res.Candidates[0].Score {
+		t.Errorf("duckdb::cpp_api scored %d, not below the winner's %d",
+			alias.Score, res.Candidates[0].Score)
+	}
+}
+
+// The penalty must not fire when every candidate looks unreachable, because
+// that means the reachability walk failed, not that the library has no targets.
+func TestUnreachablePenaltyNeedsAReachableCandidate(t *testing.T) {
+	root := tree(t, map[string]string{
+		// No top-level CMakeLists.txt at all: nothing to walk from.
+		"cmake/targets.cmake": `
+add_library(widget STATIC widget.cpp)
+add_library(widget::widget ALIAS widget)
+`,
+	})
+	res, err := Scan(root, "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Best != "widget::widget" {
+		t.Errorf("Best = %q, want widget::widget", res.Best)
+	}
+}

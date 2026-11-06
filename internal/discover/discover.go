@@ -20,6 +20,7 @@ package discover
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -51,6 +52,10 @@ type Candidate struct {
 	Score   int
 	Reasons []string
 	Veto    string // non-empty if disqualified
+	// File is the CMake file that defines the target, relative to the source
+	// root. Needed to tell a target the build really creates from one that only
+	// a packaging module defines; see reachableFrom.
+	File string
 }
 
 var (
@@ -59,6 +64,11 @@ var (
 	reProj  = regexp.MustCompile(`(?is)\bproject\s*\(\s*([A-Za-z0-9_.-]+)`)
 	reSet   = regexp.MustCompile(`(?is)\bset\s*\(\s*([A-Za-z0-9_]+)\s+([^)]*)\)`)
 	reVar   = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
+
+	// The two ways a CMake file pulls in another. The \s*\( guard keeps
+	// include_directories() and include_guard() out of reInclude.
+	reSubdir  = regexp.MustCompile(`(?is)\badd_subdirectory\s*\(\s*("[^"]+"|[^\s)]+)`)
+	reInclude = regexp.MustCompile(`(?is)\binclude\s*\(\s*("[^"]+"|[^\s)]+)`)
 )
 
 // skipDirs hold targets that are never a library's public interface.
@@ -99,6 +109,7 @@ func Scan(root, pkgName string) (Result, error) {
 
 	vars, projectName := collectVars(files)
 	raw := extractTargets(files, vars)
+	reachable := reachableFrom(files, vars)
 
 	aliases := []string{pkgName}
 	if projectName != "" && !strings.EqualFold(projectName, pkgName) {
@@ -115,6 +126,7 @@ func Scan(root, pkgName string) (Result, error) {
 		live = append(live, c)
 	}
 	score(live, aliases)
+	penalizeUnreachable(live, reachable)
 	sortCandidates(live)
 	sortCandidates(dead)
 
@@ -209,6 +221,142 @@ func skipDir(rel string) bool {
 	return false
 }
 
+// unreachablePenalty has to outweigh the namespaced-alias bonus, because that
+// bonus is what put an unreachable target on top in the first place.
+const unreachablePenalty = 60
+
+// reachableFrom returns the CMake files the top-level CMakeLists.txt can
+// actually reach, following add_subdirectory() and include().
+//
+// Without this, duckdb is discovered confidently and wrongly. Its only
+// namespaced alias, duckdb::cpp_api, is defined in
+// tools/cpp/cmake/DuckDBCppApi.cmake -- a module for the packaged release,
+// included only from tools/cpp/package/, which nothing adds as a subdirectory.
+// The target does not exist in a FetchContent build, so recommending it
+// produces a configure error from cppm's own target assertion. A scanner that
+// reads every *.cmake in the tree cannot tell that file from a real one.
+//
+// Conditions are ignored, so the result is a superset of what any single
+// configuration defines, and resolution is deliberately forgiving: an edge this
+// walk fails to follow only costs a real target its ranking, which makes cppm
+// ask instead of answer. Returns nil when there is no top-level CMakeLists.txt
+// to start from, which means "unknown" rather than "nothing is reachable".
+func reachableFrom(files []cmakeFile, vars map[string]string) map[string]bool {
+	byRel := make(map[string]int, len(files))
+	byBase := map[string][]int{}
+	for i, f := range files {
+		byRel[strings.ToLower(f.rel)] = i
+		b := strings.ToLower(path.Base(f.rel))
+		byBase[b] = append(byBase[b], i)
+	}
+	start, ok := byRel["cmakelists.txt"]
+	if !ok {
+		return nil
+	}
+
+	resolve := func(fromDir, arg string, subdir bool) []int {
+		arg = expand(strings.Trim(strings.TrimSpace(arg), `"`), vars)
+		// A ${CMAKE_CURRENT_LIST_DIR}-style prefix does not expand here, but the
+		// literal tail after it is still a usable path, so keep that rather than
+		// discarding the edge.
+		if i := strings.LastIndex(arg, "}"); i >= 0 {
+			arg = arg[i+1:]
+		}
+		arg = strings.Trim(strings.TrimPrefix(filepath.ToSlash(arg), "./"), "/")
+		if arg == "" || strings.Contains(arg, "$") {
+			return nil
+		}
+		want := arg
+		switch {
+		case subdir:
+			want = path.Join(arg, "CMakeLists.txt")
+		case !strings.HasSuffix(strings.ToLower(want), ".cmake"):
+			want += ".cmake"
+		}
+		var out []int
+		for _, c := range []string{path.Join(fromDir, want), want} {
+			if i, ok := byRel[strings.ToLower(c)]; ok {
+				out = append(out, i)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+		// CMAKE_MODULE_PATH lets include() name a module living anywhere in the
+		// tree, and the same applies to a subdirectory reached through a path
+		// this walk could not expand: fall back to matching the file name.
+		if !subdir {
+			return byBase[strings.ToLower(path.Base(want))]
+		}
+		suffix := "/" + strings.ToLower(want)
+		for i, f := range files {
+			if strings.HasSuffix(strings.ToLower(f.rel), suffix) {
+				out = append(out, i)
+			}
+		}
+		return out
+	}
+
+	seen := map[int]bool{start: true}
+	for queue := []int{start}; len(queue) > 0; {
+		cur := queue[0]
+		queue = queue[1:]
+		dir := path.Dir(files[cur].rel)
+		if dir == "." {
+			dir = ""
+		}
+		for _, edges := range []struct {
+			re     *regexp.Regexp
+			subdir bool
+		}{{reSubdir, true}, {reInclude, false}} {
+			for _, m := range edges.re.FindAllStringSubmatch(files[cur].text, -1) {
+				for _, i := range resolve(dir, m[1], edges.subdir) {
+					if !seen[i] {
+						seen[i] = true
+						queue = append(queue, i)
+					}
+				}
+			}
+		}
+	}
+
+	out := make(map[string]bool, len(seen))
+	for i := range seen {
+		out[files[i].rel] = true
+	}
+	return out
+}
+
+// penalizeUnreachable demotes targets that only an unreachable CMake file
+// defines. It demotes rather than drops them: the walk in reachableFrom is
+// approximate, and a target wrongly judged unreachable should lose the argument
+// on score, not be hidden from the user.
+func penalizeUnreachable(cands []Candidate, reachable map[string]bool) {
+	if reachable == nil {
+		return
+	}
+	// No candidate reachable at all means the walk failed rather than that every
+	// target is unusable. Penalising the whole set would only add noise.
+	anyReachable := false
+	for i := range cands {
+		if reachable[cands[i].File] {
+			anyReachable = true
+			break
+		}
+	}
+	if !anyReachable {
+		return
+	}
+	for i := range cands {
+		c := &cands[i]
+		if c.File == "" || reachable[c.File] {
+			continue
+		}
+		c.Score -= unreachablePenalty
+		c.Reasons = append(c.Reasons, "defined in a CMake file the build never reaches")
+	}
+}
+
 // collectVars gathers project() and single-valued set() definitions.
 //
 // Not optional. Target names are routinely assembled from variables -- json
@@ -263,7 +411,7 @@ func expand(s string, vars map[string]string) string {
 
 func extractTargets(files []cmakeFile, vars map[string]string) []Candidate {
 	seen := map[string]*Candidate{}
-	add := func(name, kind string, isAlias bool) {
+	add := func(name, kind, file string, isAlias bool) {
 		name = expand(strings.TrimSpace(name), vars)
 		// Still unresolved after expansion: not usable as a link name.
 		if name == "" || strings.Contains(name, "$") {
@@ -275,14 +423,14 @@ func extractTargets(files []cmakeFile, vars map[string]string) []Candidate {
 			}
 			return
 		}
-		seen[name] = &Candidate{Name: name, IsAlias: isAlias, Kind: kind}
+		seen[name] = &Candidate{Name: name, IsAlias: isAlias, Kind: kind, File: file}
 	}
 	for _, f := range files {
 		for _, m := range reAlias.FindAllStringSubmatch(f.text, -1) {
-			add(m[1], "ALIAS", true)
+			add(m[1], "ALIAS", f.rel, true)
 		}
 		for _, m := range reReal.FindAllStringSubmatch(f.text, -1) {
-			add(m[1], strings.ToUpper(m[2]), false)
+			add(m[1], strings.ToUpper(m[2]), f.rel, false)
 		}
 	}
 	out := make([]Candidate, 0, len(seen))

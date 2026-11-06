@@ -116,6 +116,12 @@
       "alternatives": ["RapidJSON"],
       "options": { "RAPIDJSON_BUILD_TESTS": "OFF", "RAPIDJSON_BUILD_DOC": "OFF", "RAPIDJSON_BUILD_EXAMPLES": "OFF" },
       "notes": "Header-only and exports no usable imported target from a subdirectory build; add its include directory manually."
+    },
+    "https://github.com/duckdb/duckdb.git": {
+      "targets": ["duckdb"],
+      "alternatives": ["duckdb_static"],
+      "options": { "BUILD_UNITTESTS": "OFF", "BUILD_SHELL": "OFF", "ENABLE_SANITIZER": "OFF", "ENABLE_UBSAN": "OFF" },
+      "notes": "Add the headers yourself -- target_include_directories(<your-target> PRIVATE ${duckdb_SOURCE_DIR}/src/include) -- because duckdb publishes them with a directory-scoped include_directories(), so linking the target carries no include path. Use <duckdb.hpp> for C++; <duckdb.h> is the C API. BUILD_UNITTESTS is OFF because it defaults ON and duckdb's test tree resolves sources against CMAKE_SOURCE_DIR, which is your project under FetchContent, so configure fails outright. The sanitizers are OFF because duckdb turns address and UB sanitizer on for Debug builds, and a consumer not built the same way fails to link with undefined __asan_* and __ubsan_* symbols."
     }
   }
 }
