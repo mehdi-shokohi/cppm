@@ -139,10 +139,15 @@ Changes from the proposal are marked.
 The core mechanism. Three tiers, first hit wins.
 
 ```
-┌─ Tier 1  EXPLICIT ── manifest "targets" ──────────────── always wins
-├─ Tier 2  RECIPE ──── embedded curated DB (go:embed) ──── known libraries
-└─ Tier 3  INFERRED ── static source scan + probe ──────── the long tail
+┌─ Tier 1  EXPLICIT ── manifest "targets" ──────────────────── always wins
+├─ Tier 2  RECIPE ──── embedded curated DB (go:embed) ──────── known libraries, instant
+├─ Tier 3  INFERRED ── static source scan + rank + veto ────── 80%, no configure needed
+├─ Tier 4  PROBED ──── configure-time enumerate + verify ───── recovers macro-based projects
+└─ Tier 5  ASK ─────── prompt with ranked candidates ───────── ambiguous or unresolved
 ```
+
+Tiers 1–3 are fast and cover the overwhelming majority. Tier 4 costs one CMake configure. Tier 5
+involves the user, which for ambiguous packages is the right answer rather than a failure.
 
 **Tier 3 pipeline** — measured at **80% correct, 0 confident errors** across ten real libraries
 ([evaluation.md](evaluation.md) §2.5). Prototype: [tools/phase0](../tools/phase0/main.go).
@@ -175,16 +180,67 @@ The core mechanism. Three tiers, first hit wins.
 8. **Persist** to the lock as `target_origin: inferred` and warn once, so the user knows a guess was
    made and can pin it.
 
-**Known hard limit.** The residual 20% is not a tuning problem. Both failures in the measurement
-(googletest, abseil) declare targets through helper macros rather than literal `add_library` calls:
+**Tier 3's limit.** The 20% it misses declare targets through helper macros rather than literal
+`add_library` calls, so no scanner can read them:
 
 ```cmake
 add_library(${cmake_package_name}::${name} ALIAS ${name})  # parameters, not variables
 cxx_library(gtest "${cxx_strict}" src/gtest-all.cc)        # custom macro
 ```
 
-Resolving these needs a CMake interpreter, not a scanner. They are Tier 2's job, which is the
-evidence-based justification for shipping the recipe DB.
+These fall through to Tier 4.
+
+---
+
+### Tier 4 — configure-time probe (fallback)
+
+Verified on googletest, which Tier 3 scores at zero candidates
+([evaluation.md](evaluation.md) §2.6).
+
+Macro-based projects hide the *bare* name but leak the **namespace** as a literal
+(`set(cmake_package_name GTest ...)`, `add_library(absl::${...} ALIAS ...)`). After a configure,
+`BUILDSYSTEM_TARGETS` yields the raw names the macros generated. Combining them resolves the case:
+
+1. Harvest namespace candidates statically, plus the `project()` name.
+2. Configure once, then read `BUILDSYSTEM_TARGETS` for each dependency subdirectory.
+3. Generate the cross product `<ns>::<raw>`, plus a `<ns>_`-prefix-stripped variant
+   (`absl_base` → `absl::base`).
+4. Verify each with `if(TARGET)` — the one question CMake answers reliably.
+5. Write the winners to the lock so the cost is paid once.
+
+```
+SPIKE_RAW              = gtest;gtest_main;gmock;gmock_main
+SPIKE_VERIFIED_ALIASES = GTest::gtest;GTest::gtest_main;GTest::gmock;GTest::gmock_main
+```
+
+Costs one configure, which `build` performs anyway. So `add` stays fast via Tiers 1–3 and Tier 4
+runs only for the hard minority.
+
+---
+
+### Tier 5 — ask the user
+
+When Tier 4 leaves more than one plausible answer, or none, `cppm add` prompts with the ranked
+candidates. For genuinely ambiguous packages this is the *correct* resolution rather than a
+fallback: `Catch2::Catch2` vs `Catch2::Catch2WithMain` is a user choice, not a discoverable fact.
+
+```
+$ cppm add github:catchorg/Catch2@v3.7.1
+  Catch2 exposes more than one linkable target:
+    1) Catch2::Catch2WithMain   test library + main()      (recommended)
+    2) Catch2::Catch2           test library, you supply main()
+    3) enter a target name manually
+    4) skip — I will wire it myself in CMakeLists.txt
+  choice [1]:
+```
+
+Rules, because this must never hang a build:
+
+- Prompt **only** when stdin is a TTY; otherwise record `target_origin: unresolved`, warn, and let
+  the configure-time `FATAL_ERROR` deliver the message.
+- `--non-interactive` forces that path explicitly, for CI.
+- `--target <name>` supplies the answer up front, so scripted use never needs the prompt.
+- Option 4 is always available and is a supported end state — §0.
 
 **Recipe entry format** (embedded, also user-extensible via `~/.config/cppm/recipes/`):
 
@@ -346,7 +402,7 @@ the `.gitignore` entries.
 | Command | Network | Writes | Notes |
 |---|---|---|---|
 | `init` | no | manifest, lock, CMakeLists, presets, src, .gitignore | `init .` supported |
-| `add` | yes | manifest, lock, generated | Resolves ref→commit, clones to cache, infers targets |
+| `add` | yes | manifest, lock, generated | Resolves ref→commit, clones to cache, infers targets. **May prompt** (Tier 5); `--target` / `--non-interactive` suppress it |
 | `remove` | no | manifest, lock, generated | |
 | `sync` | yes if lock incomplete | lock, generated | **Honours existing lock.** Idempotent |
 | `update` | yes | lock, generated | The only command that moves pins |

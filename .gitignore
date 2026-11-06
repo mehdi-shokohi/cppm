@@ -7,3 +7,7 @@ build/
 *.test
 # Phase 0 scratch
 /tools/phase0/_work/
+
+# probe spike build output
+/tools/phase0/probe_spike/build/
+/tools/phase0/probe_spike/out.log

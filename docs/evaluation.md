@@ -169,18 +169,70 @@ merely demoted, and if nothing survives the tool answers ASK. The marker is igno
 appears in the package's own name, so a library legitimately called *googletest* is not vetoed by
 its own name.
 
-**The residual 20% is a hard limit, not a tuning problem.** Both refusals have the same cause —
-targets created by helper macros rather than literal `add_library` calls:
+**The residual 20% is a limit of *static scanning*, not of the tool.** Both refusals have the same
+cause — targets created by helper macros rather than literal `add_library` calls:
 
 ```cmake
-# googletest/cmake/internal_utils.cmake — name and namespace are function parameters
+# googletest/cmake/internal_utils.cmake — bare name is a function parameter
 add_library(${cmake_package_name}::${name} ALIAS ${name})
 cxx_library(gtest "${cxx_strict}" src/gtest-all.cc)   # custom macro, not add_library
 ```
 
-Resolving these would require interpreting CMake rather than scanning it. This is precisely the
-territory the curated recipe DB exists to cover, and it validates that decision with evidence: ~20–30
-recipes turn the two refusals into hits and cover the long tail of helper-macro-based projects.
+### 2.6 A configure-time pass recovers the cases static scanning cannot
+
+An earlier draft of this document called the 20% a hard limit. That was wrong, and worth recording
+as a correction.
+
+The key observation is that these libraries hide only the **bare** name behind macros. The
+**namespace** is a literal in the source:
+
+```cmake
+set(cmake_package_name GTest CACHE INTERNAL "")          # googletest
+add_library(absl::${ABSL_CC_LIB_NAME} ALIAS ${_NAME})    # abseil — "absl" is literal
+```
+
+And once CMake has actually run, `BUILDSYSTEM_TARGETS` yields the raw names that macros generated.
+Combining the two — statically harvested namespaces × configure-time raw names, plus a
+`<ns>_` prefix-strip rule — produces candidates that `if(TARGET)` can verify. Measured on
+googletest, which static scanning scored at **zero candidates**:
+
+```
+SPIKE_RAW               = gtest;gtest_main;gmock;gmock_main
+SPIKE_VERIFIED_ALIASES  = GTest::gtest;GTest::gtest_main;GTest::gmock;GTest::gmock_main
+```
+
+`GTest::gtest_main` — the expected answer — recovered and verified. The prefix-strip rule is
+precisely what abseil needs (`absl_base` → `base` → `absl::base`), so the same mechanism should
+cover it.
+
+The cost is one CMake configure, which cppm runs anyway at first build. So discovery becomes
+two-stage: static scan for an instant answer at `add` time, configure-time probing as the fallback.
+
+**This demotes the recipe DB from required-for-correctness to a performance and knowledge
+optimisation.** It still earns its place — it makes `add` instant with no configure, and it carries
+option knowledge no probe can ever discover, such as `SPDLOG_FMT_EXTERNAL=ON` (§2.4). But it is no
+longer the only route to a working answer for macro-based projects.
+
+### 2.7 Asking the user is a first-class resolution path
+
+Worth stating explicitly, because the earlier draft treated inference failure as something to be
+*reported* rather than *resolved*.
+
+`cppm add` is an interactive command typed at a terminal, so when inference is not confident it can
+simply present the ranked candidates and ask. This is strictly better than failing, and for genuinely
+ambiguous cases it is better than inferring at all: `Catch2::Catch2` vs `Catch2::Catch2WithMain` is a
+**user choice**, not an unknown, and the measurement scoring it as a "HIT" slightly flatters the tool.
+
+Constraints on where this is allowed:
+
+| Context | Prompt? | Why |
+|---|---|---|
+| `cppm add` | Yes | User-initiated, TTY present, candidates in hand |
+| `cppm sync` / `build` | Only if TTY | Runs in CI, scripts and IDE integrations, where a prompt hangs the build |
+| Inside CMake configure | Never | CMake cannot prompt; hence the `FATAL_ERROR` hand-off |
+
+So: TTY detection, a `--non-interactive` flag, and a `--target` flag so the answer can be supplied
+up front in scripted use.
 
 **Design rule extracted:** *prefer ASK over a confident guess.* An inference tool that declines
 gracefully and names the one line to edit fits §0; one that silently links the wrong target does
