@@ -465,10 +465,17 @@ fmt         11.1.4          spdlog   v1.15.3
 SDL         release-2.30.9  abseil   20240722.0     (a date)
 ```
 
-Strict semver comparison breaks on at least two of those. Needed: a tolerant normaliser, a
-documented policy for what bare `cppm add fmt` resolves to (newest tag? default branch?), and
-matching semantics for `cppm update`. Design work more than hard code, but easy to get wrong in a
-way that is painful to change later.
+Strict semver comparison breaks on at least two of those.
+
+**Resolved by declining the responsibility.** cppm treats a version as an **opaque git ref** and
+never parses, orders or compares it — see [architecture.md](architecture.md) §3b. A library that does
+not follow semver is therefore not cppm's problem. This removes the normaliser, ranges, and version
+ordering entirely; `update` re-resolves refs rather than seeking newer releases, and a moved tag is
+reported by hash comparison, which needs no version semantics at all.
+
+The only residual choice is what bare `cppm add fmt` means: newest tag by git creation date, with
+the chosen ref echoed to the user. Its known failure mode (a back-tagged old series) is documented
+rather than fixed.
 
 ### B2. Conflict resolution UX
 

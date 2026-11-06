@@ -26,7 +26,8 @@ convenience with a clear failure path (see
 | In v1 | Out of v1 |
 |---|---|
 | `init` — scaffold a project that builds | Transitive dependency pinning |
-| `add` / `remove` — git + local deps | Version ranges or constraint solving |
+| Set the C++ standard (§3c) | Version ranges or constraint solving |
+| `add` / `remove` — git + local deps | Any interpretation of version strings (§3b) |
 | Pin to a commit in `cppm.lock` | Conflict detection and resolution |
 | Generate the dependency `.cmake` | Dependency providers (CMake 3.24) |
 | `build` — wrap `cmake --preset` | Windows / macOS / MSVC support |
@@ -166,6 +167,93 @@ Changes from the proposal are marked.
   Git diffs.
 - Local `path` dependencies have no commit and are never locked to a hash — they are editable by
   design.
+
+---
+
+## 3b. Version policy — refs are opaque
+
+**cppm does not parse, compare, order or interpret version strings.** A version is an opaque git
+ref. If a library does not follow semver, that is not cppm's concern and not cppm's bug.
+
+```bash
+cppm add github:fmtlib/fmt@11.1.4          # tag
+cppm add github:gabime/spdlog@v1.x         # branch
+cppm add github:fmtlib/fmt@123913715af     # commit
+```
+
+Resolution is mechanical: try the ref as a tag, then a branch, then a commit; resolve whatever
+matches to a full commit hash; store both the ref and the hash in the lock. No version grammar is
+involved at any point.
+
+**Consequences, all of them deliberate:**
+
+- **No ranges.** `^11.0`, `~1.2`, `>=3` are not supported. Supporting them would require knowing
+  what a version *means*, which is exactly the responsibility being declined.
+- **`cppm update` re-resolves refs; it does not find newer versions.** For a tag pin it is normally
+  a no-op. For a branch it fetches the new HEAD. "Find me a newer release" is not offered, because
+  that needs version ordering.
+- **A moved tag is reported, not followed.** If `11.1.4` resolves to a different commit than the
+  lock records, the tag was re-pointed. That is worth telling the user loudly — it is a
+  reproducibility event, and detecting it needs no version semantics, just hash comparison.
+- **Date-based, calendar and prefixed tags all just work** — `20240722.0`, `release-2.30.9`,
+  `boost-1.86.0` — because none of them is ever compared.
+
+**The one place a choice is unavoidable** is bare `cppm add fmt` with no ref. v1 picks the **newest
+tag by git creation date**, which requires no version parsing, filters obvious pre-releases
+(`rc`, `alpha`, `beta`, `-pre`) as a courtesy, and then **echoes exactly what it chose**:
+
+```
+$ cppm add github:fmtlib/fmt
+  resolved: no ref given -> newest tag 11.1.4 (2025-01-04) -> 1239137
+  pinned in cppm.lock. use @<ref> to choose a different one.
+```
+
+Known limitation, documented rather than fixed: a project that back-tags an old series (releasing
+`v1.9.5` after `v2.0.0`) will have the older tag chosen, because creation date and version order
+disagree. Printing the choice is the mitigation; the user passes an explicit ref if it is wrong.
+
+---
+
+## 3c. C++ standard
+
+The standard is cppm's to set, since not knowing CMake is the problem being solved. The manifest
+carries it, `init` writes it into `CMakeLists.txt`, and it is **not** regenerated afterwards (§1
+rule 2) — that file is the user's.
+
+```json
+"cxx": { "standard": 20, "required": true, "extensions": false }
+```
+
+```cmake
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)   # see below — not optional
+```
+
+**These must appear before the dependency include**, so dependencies inherit them.
+
+**Measured: the parent standard does propagate to dependencies.** In a project setting
+`CMAKE_CXX_STANDARD 20` and then fetching fmt and spdlog, both dependencies compiled as C++20. The
+setting is inherited through `add_subdirectory`, so one declaration covers the whole build.
+
+**`CMAKE_CXX_EXTENSIONS OFF` is the part that is easy to miss.** It defaults to **ON**, and the same
+build produced inconsistent dialects:
+
+| Target | Dialect | Why |
+|---|---|---|
+| the project's own `app` | `-std=gnu++20` | inherited the ON default |
+| fmt | `-std=gnu++20` | inherited the ON default |
+| spdlog | `-std=c++20` | sets `CXX_EXTENSIONS OFF` on its own targets |
+
+So a developer who never asked for GNU extensions gets them in their own code, and dependencies
+disagree with each other. The practical cost is code that builds with GCC and Clang and then fails
+under MSVC or strict `-std=c++20` — precisely the class of problem a tool aimed at non-experts
+should close by default. `init` therefore always writes `CMAKE_CXX_EXTENSIONS OFF`, and `doctor`
+flags a project that lacks it.
+
+Dependencies that need a *different* standard than the project are out of scope: a dependency that
+requires more than the project sets will fail to compile with a clear compiler error, and raising
+`cxx.standard` is the user's fix.
 
 ---
 
