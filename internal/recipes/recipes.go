@@ -117,6 +117,11 @@ func Lookup(repoURL string) (Recipe, bool) {
 // normalizeURL makes URL comparison insensitive to the differences that do not
 // change which repository is meant: scheme, credentials, a trailing ".git", a
 // trailing slash, and case.
+//
+// Because it also strips a "#fragment", two keys differing only by fragment
+// collapse to the same entry and one silently wins on map iteration order,
+// making resolution nondeterministic. Validate rejects that, and
+// normalizedKeys exists so it can.
 func normalizeURL(raw string) string {
 	s := strings.TrimSpace(strings.ToLower(raw))
 	// A "#suffix" marks a variant entry rather than part of the URL.
@@ -146,8 +151,37 @@ func Names() []string {
 	return out
 }
 
+// normalizedKeys maps each normalized key to the raw keys that produced it.
+func normalizedKeys() map[string][]string {
+	out := map[string][]string{}
+	b, err := builtin.ReadFile("recipes.json")
+	if err != nil {
+		return out
+	}
+	var f file
+	if err := json.Unmarshal(b, &f); err != nil {
+		return out
+	}
+	for raw := range f.Recipes {
+		n := normalizeURL(raw)
+		out[n] = append(out[n], raw)
+	}
+	for _, v := range out {
+		sort.Strings(v)
+	}
+	return out
+}
+
 // Validate checks the embedded database at build time via the test suite.
 func Validate() error {
+	// Two keys normalizing to the same URL make lookup depend on map iteration
+	// order, so the same command can resolve to different targets on different
+	// runs. That has happened once already.
+	for norm, raws := range normalizedKeys() {
+		if len(raws) > 1 {
+			return fmt.Errorf("recipe keys %v all normalize to %q, so lookup would be nondeterministic", raws, norm)
+		}
+	}
 	for url, r := range All() {
 		if url == "" {
 			return fmt.Errorf("recipe with an empty URL key")

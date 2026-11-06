@@ -117,3 +117,39 @@ func TestMalformedUserRecipesAreIgnoredNotFatal(t *testing.T) {
 		t.Error("a malformed user recipe file must not break the embedded database")
 	}
 }
+
+// Two recipe keys that normalize to the same URL make lookup depend on Go's
+// random map iteration order, so the same `cppm add` resolves to different
+// targets on different runs. This happened with a "Catch2.git#v2" variant key.
+func TestNoCollidingRecipeKeys(t *testing.T) {
+	for norm, raws := range normalizedKeys() {
+		if len(raws) > 1 {
+			t.Errorf("keys %v all normalize to %q: lookup would be nondeterministic", raws, norm)
+		}
+	}
+}
+
+func TestLookupIsDeterministic(t *testing.T) {
+	const url = "https://github.com/catchorg/Catch2.git"
+	loaded = nil
+	first, ok := Lookup(url)
+	if !ok {
+		t.Fatal("no Catch2 recipe")
+	}
+	for i := 0; i < 50; i++ {
+		loaded = nil
+		again, ok := Lookup(url)
+		if !ok {
+			t.Fatalf("run %d: recipe disappeared", i)
+		}
+		if len(again.Targets) != len(first.Targets) {
+			t.Fatalf("run %d: target count changed", i)
+		}
+		for j := range again.Targets {
+			if again.Targets[j] != first.Targets[j] {
+				t.Fatalf("run %d: resolved to %v, first run gave %v", i, again.Targets, first.Targets)
+			}
+		}
+	}
+	loaded = nil
+}

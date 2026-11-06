@@ -115,10 +115,6 @@
       "alternatives": ["RapidJSON"],
       "options": { "RAPIDJSON_BUILD_TESTS": "OFF", "RAPIDJSON_BUILD_DOC": "OFF", "RAPIDJSON_BUILD_EXAMPLES": "OFF" },
       "notes": "Header-only and exports no usable imported target from a subdirectory build; add its include directory manually."
-    },
-    "https://github.com/catchorg/Catch2.git#v2": {
-      "targets": ["Catch2::Catch2"],
-      "notes": "Catch2 v2 has no WithMain target."
     }
   }
 }
