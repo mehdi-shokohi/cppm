@@ -9,12 +9,31 @@ otherwise need.** Running a build under AddressSanitizer takes a dozen lines of 
 almost nobody remembers; that is exactly the kind of thing cppm should own. Features that merely
 re-expose what CMake already does well are declined.
 
+> **Two audiences, do not confuse them.** Almost everything below is about making **your C++
+> project** safer — the code cppm builds for you. cppm's own Go test suite is a short, separate
+> section at the end ([Maintaining cppm](#maintaining-cppm)) and is not a user-facing feature.
+
 ---
 
-## v0.2 — Testing and diagnostics
+## v0.2 — Making your C++ project safer
+
+The headline feature set, and the one with the clearest payoff. Everything here is about the code
+**cppm builds for you**: catching undefined behaviour, memory errors and data races in your own C++,
+with the configuration already written.
 
 The theme: cppm can build your project but cannot yet *run* anything, which blocks every form of
 checking. Everything below depends on the first item.
+
+The checks stack, cheapest first — a project should adopt them in this order:
+
+```
+warnings          no runtime cost, catches the most per unit of effort
+hardening         negligible cost, safe for release builds
+debug STL         only works because cppm builds dependencies from source
+sanitizers        5-15x slower, finds races and memory errors precisely
+valgrind          20-100x slower, no recompilation, finds lock-order bugs
+static analysis   no runtime at all, runs in CI
+```
 
 ### 0.2.1 `cppm test` — a CTest wrapper
 
@@ -51,49 +70,103 @@ A `dev` dependency is fetched and made available but linked only to test targets
 `cppm_link_dependencies` skips it. This has to land with or before 0.2.1, or the test story is
 wrong from the start.
 
-### 0.2.3 Sanitizer presets
+### 0.2.3 Warnings and hardening — the cheapest safety there is
+
+Worth doing before sanitizers, because it costs no runtime and catches a different, larger class of
+bug. Most C++ projects ship with warnings effectively off because nobody remembers the flags.
+
+```sh
+cppm build --warnings=strict      # or "safety": { "warnings": "strict" } in cppm.json
+```
+
+| Level | GCC/Clang | MSVC |
+|---|---|---|
+| `default` | `-Wall -Wextra` | `/W3` |
+| `strict` | adds `-Wpedantic -Wshadow -Wconversion -Wold-style-cast -Wnon-virtual-dtor -Wcast-align -Wunused -Woverloaded-virtual -Wdouble-promotion -Wformat=2` | `/W4 /permissive-` |
+| `error` | `strict` plus `-Werror` | `/WX` |
+
+**Hardening** is separate and belongs in release builds, where it costs almost nothing:
+
+```
+-D_GLIBCXX_ASSERTIONS           bounds-check std containers (ABI-compatible)
+-D_FORTIFY_SOURCE=2             checked libc calls  (needs -O1 or higher)
+-fstack-protector-strong        stack smashing detection
+-fstack-clash-protection
+-fcf-protection                 control-flow integrity
+-Wl,-z,relro,-z,now             linker hardening
+```
+
+Gotchas to encode rather than let users hit:
+
+- **`-Wall -Wextra` would warn on dependencies too.** cppm already marks them `SYSTEM` (CMake 3.25+),
+  which suppresses their warnings — so this works cleanly here but must fall back gracefully below
+  3.25, where warnings from fmt and spdlog would otherwise drown the user's own.
+- **`_FORTIFY_SOURCE` silently does nothing at `-O0`** and warns on redefinition. Set it only for
+  optimised configurations.
+- **`-D_GLIBCXX_DEBUG` is a separate, heavier thing** — see 0.2.4.
+
+### 0.2.4 Debug standard library
+
+Catches iterator invalidation, out-of-range access and container misuse that neither warnings nor
+ASan reliably find.
+
+```
+libstdc++:  -D_GLIBCXX_DEBUG -D_GLIBCXX_DEBUG_PEDANTIC
+libc++:     -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG
+```
+
+**`_GLIBCXX_DEBUG` changes the ABI**, so every translation unit linked together must use it —
+including every dependency. With system-installed libraries that is usually impossible, which is why
+most projects never turn it on.
+
+**cppm's design makes this work:** dependencies are built from source in the same tree with the same
+flags, so the whole program is consistent by construction. This is a genuine advantage of the
+FetchContent model and should be documented as one.
+
+### 0.2.5 Sanitizer presets
 
 New configure presets, selected by `cppm build --sanitize=<name>`:
 
 | Preset | Flags | Catches |
 |---|---|---|
-| `asan` | `-fsanitize=address -fno-omit-frame-pointer -g -O1` | heap/stack overflows, use-after-free, leaks |
+| `asan` | `-fsanitize=address -fno-omit-frame-pointer -g -O1` | heap/stack overflow, use-after-free, leaks |
 | `ubsan` | `-fsanitize=undefined -fno-sanitize-recover=all -g -O1` | signed overflow, bad shifts, misaligned access, bad casts |
-| `tsan` | `-fsanitize=thread -g -O1` | data races, lock-order inversions |
+| `tsan` | `-fsanitize=thread -g -O1` | **data races, lock-order inversions** |
 | `asan+ubsan` | both flag sets | the common default pairing |
 
 Flags go in `cacheVariables` as `CMAKE_CXX_FLAGS` **and** `CMAKE_EXE_LINKER_FLAGS` — a sanitizer
-that is compiled in but not linked produces undefined references, which is the single most common
-way people get this wrong.
+compiled in but not linked produces undefined references, which is the single most common way people
+get this wrong.
 
-Constraints that must be encoded in the tool, not left to the user to discover:
+Constraints the tool must encode, not leave to be discovered:
 
 - **ASan and TSan are mutually exclusive.** Requesting both must be a clear error, not a confusing
   link failure.
 - **TSan needs everything instrumented.** Partially instrumented code yields false positives.
-  Because dependencies are built in the same tree, cppm's flags reach them automatically — this is
-  a point in the design's favour and should be stated.
-- **ASan includes LeakSanitizer on Linux but not macOS.** On macOS, leak checking needs
+  Because dependencies are built in the same tree, cppm's flags reach them automatically — another
+  point in the design's favour.
+- **ASan includes LeakSanitizer on Linux but not macOS.** On macOS it needs
   `ASAN_OPTIONS=detect_leaks=1` and is unreliable; `doctor` should say so rather than silently
   differing.
-- **MSVC supports only `/fsanitize=address`.** No UBSan, no TSan. Requesting them on MSVC must fail
-  with that explanation.
+- **MSVC supports only `/fsanitize=address`.** No UBSan, no TSan. Requesting them must fail with
+  that explanation.
 - **MemorySanitizer is deliberately omitted.** It requires every dependency *including libc++* to be
-  instrumented, which in practice means building a custom standard library. Out of scope; `doctor`
-  should point at valgrind instead.
-- `ASAN_OPTIONS` / `UBSAN_OPTIONS` defaults worth setting: `abort_on_error=1`,
-  `print_stacktrace=1`, and `detect_stack_use_after_return=1`.
+  instrumented, which in practice means building a custom standard library. Valgrind's memcheck
+  covers the same ground without that cost.
+- Useful defaults: `ASAN_OPTIONS=abort_on_error=1:detect_stack_use_after_return=1`,
+  `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`, `TSAN_OPTIONS=second_deadlock_stack=1`.
 
-### 0.2.4 Valgrind, Helgrind and friends
+### 0.2.6 Valgrind, Helgrind and DRD
 
-A different mechanism from sanitizers: no recompilation, the binary runs under emulation. Wired
-through CTest's built-in memcheck support rather than reinvented.
+A different mechanism: no recompilation, the binary runs under emulation. Wired through CTest's
+built-in memcheck support rather than reinvented.
 
 ```sh
-cppm test --memcheck     # ctest -T memcheck     (Memcheck: leaks, invalid reads/writes)
-cppm test --helgrind     # ctest -T memcheck     (Helgrind: races, lock-order violations)
-cppm test --drd          # DRD: lighter-weight thread checker
-cppm test --massif       # heap profiler, writes a report
+cppm test --memcheck     # leaks, invalid reads/writes, uninitialised values
+cppm test --helgrind     # data races AND lock-order violations
+cppm test --drd          # lighter thread checker, better with many threads
+cppm test --massif       # heap profiler
+cppm test --cachegrind   # cache and branch-prediction profiling
 ```
 
 Generated into the managed include:
@@ -105,30 +178,58 @@ set(MEMORYCHECK_COMMAND_OPTIONS
 set(MEMORYCHECK_SUPPRESSIONS_FILE "${CMAKE_SOURCE_DIR}/valgrind.supp")
 ```
 
+**Helgrind versus TSan**, since both find races and the choice is not obvious:
+
+| | TSan | Helgrind |
+|---|---|---|
+| Needs recompilation | yes | **no** |
+| Speed | ~5–15× slower | ~20–100× slower |
+| False positives | few | more, especially with custom synchronisation |
+| Lock-order inversion | partial | **yes, thorough** |
+| Works on a release binary | no | **yes** |
+
+Recommendation to bake into the docs: use TSan routinely, and Helgrind when you cannot recompile
+or when you specifically suspect a lock-ordering deadlock.
+
 Constraints to encode:
 
-- **Never run a sanitizer-instrumented binary under valgrind.** They fight, and the output is
-  garbage. cppm must refuse the combination rather than produce a confusing report.
-- **`--error-exitcode=1`** is essential, or CI passes while valgrind reports errors.
+- **Never run a sanitizer-instrumented binary under valgrind.** They fight and the output is
+  meaningless. cppm must refuse the combination.
+- **`--error-exitcode=1` is essential**, or CI passes while valgrind reports errors.
 - **A suppressions file is almost always needed** for system libraries. `cppm init` should scaffold
-  an empty, commented `valgrind.supp`, and `--gen-suppressions=all` should be available to produce
-  entries.
-- **Valgrind is effectively Linux-only.** Broken on Apple Silicon, absent on Windows. On those
-  platforms `doctor` should recommend ASan, which overlaps heavily in what it catches.
-- Memcheck is roughly 10–50× slower than native, so this belongs in a nightly CI job rather than
-  on every push.
+  a commented `valgrind.supp`, and `--gen-suppressions=all` should be offered to produce entries.
+- **Valgrind is effectively Linux-only** — broken on Apple Silicon, absent on Windows. Elsewhere
+  `doctor` should recommend ASan/TSan, which overlap heavily.
+- Memcheck is 10–50× slower, so it belongs in a nightly job rather than on every push.
 
-### 0.2.5 Sanitizer and memcheck templates
+### 0.2.7 Static analysis
 
-Because the point is that the user should not have to assemble this themselves:
+Finds bugs without running anything, which makes it the cheapest check in CI.
 
-- `cppm init --with-tests` → `tests/` plus a working first test
-- a commented `valgrind.supp`
-- `.sanitizerrc`-style defaults for `ASAN_OPTIONS` / `UBSAN_OPTIONS`
-- `cppm ci --github` → a ready workflow for the *user's* project: build and test on three platforms,
-  an `asan+ubsan` job, and a nightly valgrind job
+```sh
+cppm build --analyze=clang-tidy    # or cppcheck
+```
 
----
+CMake wires these via `CMAKE_CXX_CLANG_TIDY` and `CMAKE_CXX_CPPCHECK`, and `cppm init` should
+scaffold a `.clang-tidy` with a sensible check set (`bugprone-*`, `cert-*`, `clang-analyzer-*`,
+`performance-*`, `modernize-*`).
+
+**Important trap:** `CMAKE_CXX_CLANG_TIDY` is inherited by subdirectories, so setting it in the
+managed include would run clang-tidy over every dependency — enormously slow and noisy, and the
+findings would not be the user's to fix. It must be applied as a **per-target property on the user's
+own targets only**. This is the kind of detail that makes the feature worth cppm owning rather than
+leaving to a snippet copied from a blog post.
+
+### 0.2.8 Templates and project CI
+
+The point is that the user should not assemble any of this themselves:
+
+- `cppm init --with-tests` → a `tests/` directory and a working first test
+- a commented `valgrind.supp` and a `.clang-tidy`
+- sanitizer environment defaults
+- `cppm ci --github` → a ready workflow for the **user's** project: build and test on three
+  platforms, an `asan+ubsan` job, a `tsan` job, a nightly valgrind/helgrind job, and clang-tidy on
+  changed files
 
 ## v0.3 — Correctness and reproducibility
 
@@ -176,9 +277,10 @@ leaving the user with a raw CMake message.
 
 ---
 
-## Ongoing — cppm's own pipeline
+## Maintaining cppm
 
-Separate from the features above; this is about trusting the tool.
+Separate from everything above: this is cppm's **own** Go test suite, not a user-facing feature.
+Nothing here affects projects built with cppm.
 
 | Item | Why |
 |---|---|
@@ -218,3 +320,7 @@ the project being otherwise settled before it is attempted.
 Within 0.2, the order is forced: **dev-dependencies (0.2.2) must land with or before `cppm test`
 (0.2.1)**, because a test command that links Catch2 into your release binary is wrong from the first
 release and becomes a breaking change to fix later.
+
+After that, 0.2.3 (warnings and hardening) is the best value per hour of work: no runtime cost, no
+new concepts for the user, and it catches more real bugs than any single sanitizer. Sanitizers and
+valgrind are more impressive but find a narrower class of problem more slowly.
