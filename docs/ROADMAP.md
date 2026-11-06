@@ -22,8 +22,22 @@ The headline feature set, and the one with the clearest payoff. Everything here 
 with the configuration already written.
 
 The theme was that cppm could build your project but could not *run* anything, which blocked every
-form of checking: every item below is, at bottom, "run the tests under X". **0.2.1 and 0.2.2 have
-landed**, so that blocker is gone and the rest of this section is now unblocked work.
+form of checking: every item below is, at bottom, "run the tests under X". **0.2.1 and 0.2.2 shipped
+in `v0.2.2`**, so that blocker is gone and the rest of this section is now unblocked work.
+
+| Item | Status |
+|---|---|
+| 0.2.1 `cppm test` | **done** — `v0.2.2` |
+| 0.2.2 Dev-only dependencies | **done** — `v0.2.2` |
+| 0.2.3 Warnings and hardening | **next** |
+| 0.2.4 Debug standard library | planned |
+| 0.2.5 Sanitizer presets | planned |
+| 0.2.6 Valgrind, Helgrind and DRD | planned |
+| 0.2.7 Static analysis | planned |
+| 0.2.8 CI stages | planned |
+
+Tags follow this numbering rather than a semver patch series: `v0.2.2` means "roadmap items through
+0.2.2 are in", and there was no `v0.2.0` or `v0.2.1`.
 
 The checks stack, cheapest first — a project should adopt them in this order:
 
@@ -121,7 +135,7 @@ How it ended up working, and why:
 - `--target` now also applies to `local:` dependencies. It was documented for `add` but
   `addPath` never consulted it, so a local library's target name could not be pinned at all.
 
-### 0.2.3 Warnings and hardening — the cheapest safety there is
+### 0.2.3 Warnings and hardening — the cheapest safety there is — **next**
 
 Worth doing before sanitizers, because it costs no runtime and catches a different, larger class of
 bug. Most C++ projects ship with warnings effectively off because nobody remembers the flags.
