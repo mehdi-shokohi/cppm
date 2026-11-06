@@ -35,6 +35,10 @@ valgrind          20-100x slower, no recompilation, finds lock-order bugs
 static analysis   no runtime at all, runs in CI
 ```
 
+Each of those is both a local command and a **CI stage** (0.2.8). One declaration in `cppm.json`
+drives the local preset and the generated pipeline, so a check cannot pass on your machine and fail
+in CI because two files drifted apart.
+
 ### 0.2.1 `cppm test` — a CTest wrapper
 
 Prerequisite for the rest. Thin, like `cppm build`:
@@ -220,16 +224,99 @@ findings would not be the user's to fix. It must be applied as a **per-target pr
 own targets only**. This is the kind of detail that makes the feature worth cppm owning rather than
 leaving to a snippet copied from a blog post.
 
-### 0.2.8 Templates and project CI
+### 0.2.8 CI stages for your project
 
-The point is that the user should not assemble any of this themselves:
+Today cppm has CI for *itself* and generates none for you. Wiring an ASan job in GitHub Actions is
+the same category of work as wiring ASan in CMake: a dozen fiddly lines nobody remembers. So it
+belongs here too.
+
+**The key design decision: the CI file must be thin.**
+
+The logic lives in cppm, and each generated workflow is a few lines that call it:
+
+```sh
+cppm check --stage sanitize-asan
+```
+
+Not in generated YAML. Three reasons, and the first is the one that matters:
+
+1. **Local and CI behave identically.** The usual pain is a check that passes locally and fails in
+   CI because the YAML drifted from the Makefile. If both run `cppm check --stage X`, they cannot
+   diverge.
+2. cppm does not end up maintaining YAML dialects for GitHub, GitLab, Jenkins and Azure. Each
+   generator becomes a thin template over the same command.
+3. `cppm check` is useful on its own — run the whole pipeline locally before pushing.
+
+### Declaring the stages
+
+In `cppm.json`, so that one declaration drives both the local presets and the CI file, exactly as it
+already drives the CMake:
+
+```json
+"checks": {
+  "warnings":   "error",
+  "sanitizers": ["asan+ubsan", "tsan"],
+  "valgrind":   ["memcheck", "helgrind"],
+  "analyze":    ["clang-tidy"],
+  "coverage":   true,
+  "platforms":  ["linux", "macos", "windows"],
+  "compilers":  ["gcc", "clang"]
+}
+```
+
+```sh
+cppm check                          # every configured stage, locally
+cppm check --stage sanitize-tsan    # one stage
+cppm check --list                   # what is configured
+cppm ci --github                    # emit .github/workflows/cppm.yml
+cppm ci --gitlab                    # emit .gitlab-ci.yml
+cppm ci --script                    # emit a plain shell script, for any other CI
+```
+
+### The stage set
+
+Ordered fast-to-slow, so failures surface early:
+
+| Stage | Runs | Typical cost | Platforms |
+|---|---|---|---|
+| `warnings` | build with `-Werror` | fast | all |
+| `build` | matrix build | fast | all |
+| `test` | `ctest` | fast | all |
+| `analyze-clang-tidy` | static analysis | medium, no runtime | linux |
+| `sanitize-asan` | ASan + LeakSanitizer | 2–3× | linux, macos |
+| `sanitize-ubsan` | UBSan | ~1.2× | linux, macos |
+| `sanitize-tsan` | ThreadSanitizer | 5–15× | linux |
+| `coverage` | gcov/llvm-cov, upload | medium | linux |
+| `valgrind-memcheck` | Memcheck | 10–50× | linux, **nightly** |
+| `valgrind-helgrind` | Helgrind | 20–100× | linux, **nightly** |
+
+### Practical CI facts to encode
+
+These are the things that make a generated pipeline actually work, and the reason this is worth
+generating rather than documenting:
+
+- **Each sanitizer needs its own build directory.** The flags differ, so reusing a build tree makes
+  CMake reconfigure from scratch anyway — or worse, silently mixes instrumented and uninstrumented
+  objects.
+- **Cache `~/.cache/cppm` and `build/*/_deps`.** Without it every job re-clones every dependency,
+  which dominates CI time. This is the single biggest speed win and the easiest thing to forget.
+- **Sanitizers belong on Linux only by default.** A 3 OS × 2 compiler × 4 sanitizer matrix is 24
+  jobs for no extra signal; the bugs are not platform-specific.
+- **Valgrind stages must be `schedule`-triggered, not `push`.** At 10–50× slowdown they will
+  otherwise make every pull request unbearable.
+- **`--error-exitcode=1` for valgrind, `halt_on_error=1` for UBSan.** Without them the job goes
+  green while the tool reports errors — the worst possible outcome, since it buys false confidence.
+- **Windows cannot run UBSan, TSan or valgrind.** The generator must omit those jobs rather than
+  emit ones that always fail.
+- **macOS has no LeakSanitizer.** The ASan job there should not claim to check for leaks.
+- **ccache or sccache** on the compiler, keyed per stage.
+
+### Templates that come with it
 
 - `cppm init --with-tests` → a `tests/` directory and a working first test
 - a commented `valgrind.supp` and a `.clang-tidy`
 - sanitizer environment defaults
-- `cppm ci --github` → a ready workflow for the **user's** project: build and test on three
-  platforms, an `asan+ubsan` job, a `tsan` job, a nightly valgrind/helgrind job, and clang-tidy on
-  changed files
+- `cppm ci --github` → the workflow above, with caching and the platform exclusions already correct
 
 ## v0.3 — Correctness and reproducibility
 

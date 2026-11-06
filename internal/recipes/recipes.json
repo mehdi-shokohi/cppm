@@ -55,9 +55,10 @@
       "notes": "Named 'benchmark', which the veto rule would otherwise reject; the recipe bypasses discovery entirely."
     },
     "https://github.com/madler/zlib.git": {
-      "targets": ["ZLIB::ZLIB"],
-      "alternatives": ["zlib", "zlibstatic"],
-      "options": { "ZLIB_BUILD_EXAMPLES": "OFF" }
+      "targets": ["zlib"],
+      "alternatives": ["zlibstatic"],
+      "options": { "ZLIB_BUILD_EXAMPLES": "OFF" },
+      "notes": "zlib exports bare targets with no namespace: zlib (shared) and zlibstatic (static). ZLIB::ZLIB exists only via find_package(ZLIB) against an installed copy, not from a subdirectory build."
     },
     "https://github.com/google/re2.git": {
       "targets": ["re2::re2"],
