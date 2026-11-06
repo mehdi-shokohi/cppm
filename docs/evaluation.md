@@ -400,6 +400,17 @@ See [architecture.md](architecture.md) for the revised schemas, package layout a
 
 ## 6b. Remaining risk register
 
+> **Scope note.** v1 is deliberately three things — start a project, download a dependency, wire it
+> into CMake ([architecture.md](architecture.md) §0, "v1 scope"). Under that scope **A1, A2, A3, B1
+> and B2 below are deferred or accepted as documented limitations rather than solved.** They are
+> kept here because they are real and will matter at v2, and because knowing *why* they are
+> acceptable is what makes deferring them a decision rather than an oversight.
+>
+> What still needs care in v1: **B3** (how much to model, since `init`'s template sets the
+> expectation) and the generated CMake interface, which is a compatibility surface cppm cannot
+> migrate later because it does not own the user's `CMakeLists.txt`
+> ([architecture.md](architecture.md) §5).
+
 What Phase 0 and the spikes have **retired**: target discovery (§2.1–2.7), per-dependency option
 injection (verified — suppressing `BUILD_TESTING` and `SPDLOG_BUILD_EXAMPLE` produced a clean
 13-step build with no test or example targets), commit pinning with shallow fallback (§2.3), and
@@ -474,6 +485,11 @@ build-system DSL and competes with cmkr, contradicting §0.
 A defensible line: cppm models **just enough to scaffold and link** — target kind, sources,
 dependency sets — and anything beyond that is the user's `CMakeLists.txt`. Worth writing down
 before `init` is implemented, because the template is what sets the expectation.
+
+**v1 answer:** one target, an explicit source list, no globs. If a project outgrows that, the user
+edits `CMakeLists.txt` — which §0 already establishes as a supported outcome rather than a failure.
+The manifest keeps a `targets` section so the schema can grow, but v1 neither generates nor reads
+more than the single-target case.
 
 ### C1. The generator must target a range of CMake versions
 

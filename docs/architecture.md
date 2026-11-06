@@ -19,6 +19,41 @@ This boundary is what makes the design tractable: target inference can be an 80%
 convenience with a clear failure path (see
 [evaluation.md](evaluation.md) §2.5) rather than a correctness guarantee it could not meet.
 
+### v1 scope — deliberately three things
+
+**Start a project. Download a dependency. Wire it into CMake.** That is the whole of v1.
+
+| In v1 | Out of v1 |
+|---|---|
+| `init` — scaffold a project that builds | Transitive dependency pinning |
+| `add` / `remove` — git + local deps | Version ranges or constraint solving |
+| Pin to a commit in `cppm.lock` | Conflict detection and resolution |
+| Generate the dependency `.cmake` | Dependency providers (CMake 3.24) |
+| `build` — wrap `cmake --preset` | Windows / macOS / MSVC support |
+| `list`, `info`, `doctor`, `clean` | Non-CMake libraries |
+
+This is not a reduced version of the real tool — it *is* the tool for a first release. A developer
+who can run `cppm init`, `cppm add github:fmtlib/fmt@11.1.4`, `cppm build` and get a working binary
+without reading CMake documentation has received the whole value proposition.
+
+**What this scope buys.** Every A-tier risk in [evaluation.md](evaluation.md) §6b was a consequence
+of promising more than "download and wire it up":
+
+- **A1** (lockfile misses transitive deps) → a documented limitation, not a defect. No dependency
+  provider needed, which removes the single largest unspiked piece of engineering.
+- **A2** (`add_subdirectory` pollution) → inherent to FetchContent. `doctor` warns; cppm does not
+  try to fix it.
+- **A3** (MSVC runtime mismatch) → out of scope. Linux first.
+- **B1** (version constraints) → collapses. v1 accepts a **tag, branch or commit**, and nothing
+  else. No semver comparison, so `20240722.0` and `release-2.30.9` stop being a problem. Bare
+  `cppm add fmt` picks the newest tag by git creation date, which needs no version parsing at all.
+- **B2** (conflict UX) → deferred. Document first-declaration-wins and move on.
+- **C1** (CMake keyword matrix) → becomes a free choice, since the 3.24 floor existed *only* for
+  dependency providers.
+
+What survives is the part that is genuinely hard to change later: §1's file-ownership boundary and
+§5's generated interface.
+
 ---
 
 ## 1. Design rules
@@ -331,6 +366,29 @@ Three things the proposal's sketch lacks:
 
 `cppm_link_dependencies` accepts an explicit dependency list, addressing §3.5, while bare
 `cppm_link_dependencies(App)` still links everything for the simple case.
+
+### This generated interface is cppm's public API
+
+Worth stating plainly, because it is the one thing in a minimal v1 that is genuinely expensive to
+get wrong.
+
+Internal architecture can be rewritten freely. But the moment a user has
+`cppm_link_dependencies(App)` and `include(.cppm/generated/cppm_dependencies.cmake)` sitting in a
+`CMakeLists.txt` that cppm promised never to rewrite (§1 rule 2), those names are a compatibility
+surface. Changing them later breaks every existing project, and cppm cannot migrate them because
+it does not own that file.
+
+So the small surface is deliberate, and should stay small:
+
+| Name | Guarantee |
+|---|---|
+| `.cppm/generated/cppm_dependencies.cmake` | the include path, stable |
+| `cppm_link_dependencies(<target> [deps...])` | the linking entry point |
+| `CPPM_TARGETS_<dep>` | per-dependency target list, for manual wiring |
+| `CPPM_DEPENDENCIES` | the full dependency name list |
+
+Everything else in the generated file is an implementation detail and should be prefixed `_cppm_`
+so it is visibly private. Decide this before `init` ships, not after.
 
 ### Dependency provider — `.cppm/generated/cppm_provider.cmake`
 
