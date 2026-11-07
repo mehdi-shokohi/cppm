@@ -93,7 +93,11 @@ func Sync(p *project.Project) ([]string, error) {
 	var changes []string
 
 	// --- the generated include ---
-	managed := cmakegen.Managed(p.Manifest, p.Lock, Version)
+	globbed, _, err := expandSourceGlobs(p)
+	if err != nil {
+		return nil, err
+	}
+	managed := cmakegen.Managed(p.Manifest, p.Lock, Version, globbed)
 	previous, _ := os.ReadFile(p.ManagedCMakePath())
 	same, err := fileHasContent(p.ManagedCMakePath(), managed)
 	if err != nil {
@@ -146,6 +150,12 @@ func describeManagedChange(before, after string, m *manifest.Manifest) string {
 	}
 	if before == "" {
 		return fmt.Sprintf("generated %s", cmakegen.GeneratedRelPath)
+	}
+	// A changed source list is the most likely reason for a regeneration in a
+	// project using "sourceGlobs", and "regenerated (C++20, 0 dependencies)"
+	// would say nothing about it.
+	if oldN, newN := globbedSourceCount(before), globbedSourceCount(after); oldN != newN {
+		return fmt.Sprintf("source list %d -> %d file(s) from \"sourceGlobs\"", oldN, newN)
 	}
 	return fmt.Sprintf("regenerated %s (C++%d, %d dependency(ies))",
 		cmakegen.GeneratedRelPath, m.CXX.Standard, len(m.Dependencies))

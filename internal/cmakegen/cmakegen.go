@@ -226,7 +226,14 @@ const GeneratedRelPath = ".cppm/generated/cppm.cmake"
 // Putting the standard here rather than in CMakeLists.txt is what makes
 // cppm.json authoritative -- editing the manifest and running sync takes effect,
 // without cppm ever touching a user-owned file.
-func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string) string {
+// GlobbedSources maps a target name to the files `cppm sync` expanded from its
+// "sourceGlobs" patterns. A target with no patterns, or whose patterns matched
+// nothing, must be absent rather than present and empty: the generated CMake
+// fails loudly on a target it was told about but cannot find, and an empty
+// entry would turn that check into a false alarm.
+type GlobbedSources map[string][]string
+
+func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string, globbed GlobbedSources) string {
 	var b strings.Builder
 
 	b.WriteString(DoNotEditBanner)
@@ -361,6 +368,8 @@ func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string) string 
 		b.WriteString("endif()\n\n")
 	}
 
+	writeGlobbedSources(&b, m, globbed)
+
 	// Verification. Because target names are partly inferred, a clear failure
 	// here is a primary user experience rather than an edge case.
 	b.WriteString(`# ---------------------------------------------------------------------------
@@ -437,6 +446,78 @@ if(PROJECT_IS_TOP_LEVEL)
 endif()
 `)
 	return b.String()
+}
+
+// writeGlobbedSources emits the files expanded from "sourceGlobs" and attaches
+// them to their targets.
+//
+// Three decisions worth recording, because none is reversible cheaply:
+//
+// The file list is written out, not globbed by CMake. A file(GLOB) at configure
+// time makes the set of translation units depend on what is on disk at that
+// moment and shows up in no diff; without CONFIGURE_DEPENDS it is not even
+// re-evaluated when a file appears. The cost of expanding here is that a new
+// source file needs a `cppm sync` first. See internal/sources.
+//
+// target_sources() is deferred rather than called directly, because this file
+// is included before the user's add_executable() runs -- it has to be, since
+// the dependencies and the C++ standard must be set first. cmake_language(DEFER)
+// runs the call at the end of the including directory, by which time the
+// targets exist. The alternative was a new public variable for CMakeLists.txt
+// to reference, which cppm could never migrate later.
+//
+// Paths are absolute via CMAKE_CURRENT_SOURCE_DIR rather than relative. A
+// relative path in target_sources() is resolved against the calling directory
+// under CMP0076, and the calling directory of a deferred call is not obvious to
+// anyone reading this; making it explicit removes the question.
+func writeGlobbedSources(b *strings.Builder, m *manifest.Manifest, globbed GlobbedSources) {
+	var targets []string
+	for _, name := range m.TargetNames() {
+		if len(globbed[name]) > 0 {
+			targets = append(targets, name)
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	b.WriteString("# Sources from the \"sourceGlobs\" patterns in cppm.json\n")
+	b.WriteString("#\n")
+	b.WriteString("# Expanded by 'cppm sync', not globbed by CMake, so this list is reviewable\n")
+	b.WriteString("# and a build is what the repository says it is. A source file added since\n")
+	b.WriteString("# the last sync is NOT here yet: run 'cppm sync' (or 'cppm build', which\n")
+	b.WriteString("# syncs first) to pick it up. Run 'cppm sources' to see the patterns.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Attached by a deferred target_sources() because this file is included\n")
+	b.WriteString("# before your targets exist, and cppm does not edit CMakeLists.txt.\n")
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	fmt.Fprintf(b, "set(_cppm_glob_targets %s)\n", strings.Join(targets, " "))
+	for _, name := range targets {
+		fmt.Fprintf(b, "set(_cppm_glob_sources_%s\n", name)
+		for _, f := range globbed[name] {
+			fmt.Fprintf(b, "    \"${CMAKE_CURRENT_SOURCE_DIR}/%s\"\n", f)
+		}
+		b.WriteString(")\n")
+	}
+	b.WriteString(`
+function(_cppm_apply_globbed_sources)
+    foreach(_cppm_gt IN LISTS _cppm_glob_targets)
+        if(NOT TARGET ${_cppm_gt})
+            message(FATAL_ERROR
+                "cppm: cppm.json gives target '${_cppm_gt}' a \"sourceGlobs\" list, but\n"
+                "CMakeLists.txt defines no such target.\n"
+                "Either define it, e.g.\n"
+                "    add_executable(${_cppm_gt} ...)\n"
+                "or run 'cppm sources remove --target ${_cppm_gt} <pattern>' to drop the patterns.")
+        endif()
+        target_sources(${_cppm_gt} PRIVATE ${_cppm_glob_sources_${_cppm_gt}})
+    endforeach()
+endfunction()
+
+cmake_language(DEFER CALL _cppm_apply_globbed_sources)
+
+`)
 }
 
 // preset mirrors the subset of CMakePresets.json that cppm generates.

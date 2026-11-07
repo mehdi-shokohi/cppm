@@ -120,6 +120,81 @@ How it ended up working, and why:
 
 ---
 
+## v0.2.3 — Getting a project and its files in, with less typing — **done**
+
+Two gaps that every new user hit in the first ten minutes, neither of which is about dependencies.
+
+| Item | Status |
+|---|---|
+| 0.2.3 `cppm install` | **done** — `v0.2.3` |
+| 0.2.4 `cppm sources` | **done** — `v0.2.3` |
+
+### 0.2.3 `cppm install` — what to run after cloning — **done**
+
+```sh
+cppm install                  # resolve gaps, regenerate, configure
+cppm install --no-configure   # generated files only, no network
+```
+
+Every ecosystem has one command that turns a clone into a working checkout, and cppm's answer was
+"`cppm build`, probably" — which is true only when `cppm.lock` is complete. `install` resolves the
+dependencies the lockfile does not pin, regenerates the cppm-owned files, and configures, which is
+the step that downloads anything.
+
+- **It never moves a pin**, including when `cppm.json` has been edited to ask for a different ref
+  than `cppm.lock` holds. That disagreement is `doctor`'s to report and `update`'s to act on;
+  constraint 6 covers `sync`, and `install` is the command most likely to be told to violate it.
+- **It resolves a *missing* pin, which is not the same thing.** A clone with no lockfile has
+  nothing to preserve, so the gaps are filled and written, and the output says to commit the result.
+- **It reuses `add`'s tiered target discovery**, so a dependency first resolved by `install` gets
+  the same target names it would have got from `cppm add`. Without that, `CPPM_TARGETS_<dep>` comes
+  back empty and `cppm_link_dependencies` links nothing — a build that succeeds and is wrong.
+- **It takes the default branch for a dependency with no `"version"`** rather than prompting:
+  `install` has to work unattended in CI, where a prompt is a hang.
+- **It is not `cmake --install`.** Worth saying in the help text, because the name is borrowed from
+  npm and pip, not from CMake.
+
+### 0.2.4 `cppm sources` — add a folder, not a file at a time — **done**
+
+```sh
+cppm sources add src/net              # every C++ source under src/net
+cppm sources add "src/**/*.cpp"
+cppm sources                          # the patterns, and what they match now
+cppm sources remove src/net
+```
+
+Before this, growing a project meant editing `CMakeLists.txt` by hand for every new `.cpp` — the
+most common reason a cppm user had to learn CMake at all. The patterns live in `cppm.json` under
+`targets.<name>.sourceGlobs`.
+
+Constraint 1 shaped the whole design: cppm cannot write the files into `CMakeLists.txt`, so the
+generated include attaches them with `target_sources()` through `cmake_language(DEFER CALL ...)`,
+deferred because the include necessarily runs before the user's `add_executable()`. See
+[architecture.md](architecture.md) §5 — this is the second feature to go through that door, after
+dev dependencies, and like that one it added **no** new public CMake name.
+
+- **Expansion happens in Go at sync time, not in `file(GLOB)` at configure time.** A configure-time
+  glob leaves the set of translation units undiffable and, without `CONFIGURE_DEPENDS`, stale. The
+  cost is that a file created since the last sync is compiled only after the next one — and `cppm
+  build` syncs first, so the ordinary workflow is unaffected. An e2e test covers exactly that
+  sequence, because it is the one thing this choice gives up.
+- **`.cppm/`, `build/` and any directory holding a `CMakeCache.txt` are never walked.** `.cppm/`
+  holds every dependency's full source tree, so `**/*.cpp` would otherwise compile fmt and Catch2
+  into the user's own target.
+- **A pattern naming a directory means every C++ source beneath it**, re-expanded on each sync, and
+  it is the form the docs push. An explicit `*.cpp` pattern silently misses the `.cc` file someone
+  adds later; a directory does not.
+- **A target with patterns but no matched files is omitted from the generated file entirely.** The
+  generated code raises a `FATAL_ERROR` for a target `sourceGlobs` names and `CMakeLists.txt` does
+  not define — that error is the feature's only real failure mode — and an empty list would make
+  it fire spuriously.
+- **`"sources"` and `"sourceGlobs"` stay separate fields.** `"sources"` is what the user's own
+  `CMakeLists.txt` names and is still read by `init` alone; keeping them apart is what lets
+  `cppm sources` report honestly which files came from where, and lets the generated file skip the
+  ones already listed.
+
+---
+
 ## v0.3 — Making your C++ project safer
 
 The headline feature set, and the one with the clearest payoff. Everything here is about the code

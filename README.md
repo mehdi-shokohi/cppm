@@ -80,7 +80,11 @@ v1 is three things: start a project, download a dependency, wire it into CMake.
 cppm init [<dir>] [--std 20] [--name N] [--lib] [--with-tests] [--compiler clang++]
           [--generator Ninja] [--force]
 cppm add <spec> [--target T] [--name N] [--dev] [--non-interactive] [--no-discover] [--force]
+cppm install [--no-configure] [--release] [--non-interactive] [--no-discover]
+                               aliases: fetch, bootstrap
 cppm remove <dep>...           alias: rm
+cppm sources [add|remove] <pattern>... [--target T]
+                               alias: src
 cppm update [<dep>...] [--dry-run]
 cppm sync [--quiet]            aliases: apply, regen
 cppm build [--debug|--release] [--clean] [--jobs N] [--target T] [--verbose]
@@ -93,6 +97,27 @@ cppm clean [--all]
 
 Flags work before or after positional arguments, so `cppm init MyApp --std 17` does what it looks
 like.
+
+## Cloning a project that uses cppm
+
+```bash
+git clone https://example.com/team/app
+cd app
+cppm install
+```
+
+`install` needs nothing but `cppm.json`. It resolves any dependency `cppm.lock` does not already
+pin, regenerates `.cppm/generated/cppm.cmake` and `CMakePresets.json`, and configures the build
+tree — which is the step that actually downloads the dependencies. Then `cppm build`.
+
+It never moves a pin. A dependency already in `cppm.lock` is fetched at exactly that commit, even
+if `cppm.json` has since been changed to ask for a different ref; `cppm doctor` reports that
+disagreement and only `cppm update` acts on it. If the lockfile is missing or incomplete, the gaps
+are resolved and written, and the result is worth committing.
+
+`cppm install --no-configure` stops after writing the generated files, before any network work.
+
+This is not `cmake --install`: cppm does not copy build output into a prefix.
 
 ## Adding dependencies
 
@@ -275,6 +300,114 @@ MyApp/
 ├── .cppm/             generated files                  (git-ignored)
 └── build/             build output                     (git-ignored)
 ```
+
+## Adding files and folders
+
+Two ways, and the difference is who keeps the list.
+
+### cppm sources — let cppm track a folder
+
+```bash
+cppm sources add src/net            # every C++ source under src/net, recursively
+cppm sources add "src/**/*.cpp"     # the same, for the whole tree
+cppm sources add "src/codec/*.cpp"  # one directory, not its subdirectories
+cppm sources                        # the patterns, and what they match right now
+cppm sources remove src/net
+```
+
+Quote a pattern containing `*` so the shell does not expand it first. `*`, `?` and `[class]` match
+within one path segment; `**` spans directories. **Prefer the plain directory form** — a file
+added to `src/net` tomorrow needs no new pattern.
+
+The patterns live in `cppm.json`:
+
+```json
+"targets": {
+  "MyApp": {
+    "kind": "executable",
+    "sources": ["src/main.cpp"],
+    "sourceGlobs": ["src/net"]
+  }
+}
+```
+
+`sources` is what *your* `CMakeLists.txt` names. `sourceGlobs` is what cppm attaches on top, from
+`.cppm/generated/cppm.cmake` — so **`CMakeLists.txt` is still never written to after `init`**. The
+generated file calls `target_sources()` through `cmake_language(DEFER)`, because the include runs
+before your `add_executable()` does.
+
+The patterns are expanded by `cppm sync`, not globbed by CMake. A `file(GLOB)` at configure time
+makes the set of translation units depend on whatever is on disk at that moment and shows up in no
+diff. The cost of expanding ahead of time is that a **newly created file is compiled only after a
+sync** — and `cppm build` syncs first, so in practice you just build.
+
+Some directories are never searched, or `**/*.cpp` would compile every dependency into your own
+target: anything beginning with a dot (so `.cppm/`, which holds the dependency sources), `build/`,
+and any directory containing a `CMakeCache.txt`.
+
+Files already in `sources` are skipped, since `CMakeLists.txt` names those itself.
+
+### By hand in CMakeLists.txt
+
+Nothing stops you doing it yourself, and for a handful of files it is clearer. Note that editing
+`sources` in `cppm.json` is *not* the way: that list is read by `init` only, so changing it later
+has no effect on the build.
+
+List the file in the target:
+
+```cmake
+add_executable(MyApp
+    src/main.cpp
+    src/net/socket.cpp
+    src/net/resolver.cpp
+)
+```
+
+Nothing to sync — the file is in your target the moment CMake next configures, and `cppm build`
+configures. A list you maintain by hand stays the clearest record of what a target compiles; the
+`sourceGlobs` above exist for the trees where that stops being true.
+
+### Headers
+
+`init` creates `include/` and generates:
+
+```cmake
+target_include_directories(MyApp PRIVATE include)
+```
+
+So headers under `include/` are found by their path below it: `include/myapp/net/socket.hpp` is
+`#include "myapp/net/socket.hpp"`. The extra directory level is what keeps your headers from
+colliding with a dependency's. For headers private to the implementation, add `src` as well:
+
+```cmake
+target_include_directories(MyApp PRIVATE include src)
+```
+
+A library whose headers its *consumers* need must say `PUBLIC` rather than `PRIVATE`; `init` writes
+`PRIVATE` because the scaffold has no consumers yet.
+
+### A subfolder with its own CMakeLists.txt
+
+Works normally:
+
+```cmake
+include("${CMAKE_CURRENT_SOURCE_DIR}/.cppm/generated/cppm.cmake")   # keep this above
+add_subdirectory(src/engine)
+```
+
+`cppm_link_dependencies()` is a CMake function and `CPPM_TARGETS_<dep>` is an ordinary variable, so
+both are visible inside the subdirectory — provided the generated include stays above the
+`add_subdirectory()` call, as `init` wrote it.
+
+### A new target you add by hand
+
+Two things cppm cannot infer from a target that exists only in `CMakeLists.txt`:
+
+- **Dev dependencies.** `cppm_link_dependencies` adds them only for targets declared
+  `"test": true` in `cppm.json`. Either add the target there and run `cppm sync`, or name the
+  dependencies explicitly: `cppm_link_dependencies(my_tests Catch2)`.
+- **`cppm test --filter`.** It matches CTest names, so a hand-written test target needs its own
+  `add_test(NAME my_tests COMMAND my_tests)`.
 
 ## The generated CMake interface
 

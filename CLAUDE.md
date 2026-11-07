@@ -78,6 +78,7 @@ The constraint is usually the point.
 | `internal/vcs` | spec parsing, ref resolution, git CLI, source cache |
 | `internal/discover` | scan, resolve variables, veto, rank, confidence gate |
 | `internal/recipes` | embedded curated database + user overrides |
+| `internal/sources` | expands `sourceGlobs` patterns; no cppm imports, so `manifest` can use it |
 | `internal/cmakegen` | the CMakeLists template and the managed include |
 | `internal/toolchain` | locates and runs cmake/ctest/ninja/git/compiler |
 | `internal/e2e` | drives the real binary against real CMake |

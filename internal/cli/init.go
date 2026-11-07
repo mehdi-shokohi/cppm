@@ -205,7 +205,7 @@ func runInit(dir string, o *initOpts) error {
 	owned := []struct{ rel, content string }{
 		{manifest.FileName, string(manifestBytes)},
 		{lockfile.FileName, string(lockBytes)},
-		{cmakegen.GeneratedRelPath, cmakegen.Managed(m, lock, Version)},
+		{cmakegen.GeneratedRelPath, cmakegen.Managed(m, lock, Version, nil)},
 		{"CMakePresets.json", presets},
 	}
 	// Files the user owns; never clobbered once they exist.

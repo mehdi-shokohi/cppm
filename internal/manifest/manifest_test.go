@@ -108,7 +108,7 @@ func TestValidateRejectsBadInput(t *testing.T) {
 		}, "invalid kind"},
 		{"target without sources", func(m *Manifest) {
 			m.Targets["MyApp"] = Target{Kind: KindExecutable}
-		}, "at least one source"},
+		}, "at least one entry in \"sources\""},
 		{"target depends on unknown", func(m *Manifest) {
 			m.Targets["MyApp"] = Target{Kind: KindExecutable, Sources: []string{"a.cpp"},
 				Dependencies: []string{"ghost"}}

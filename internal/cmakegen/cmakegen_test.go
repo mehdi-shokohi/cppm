@@ -28,7 +28,7 @@ func sampleLock() *lockfile.Lock {
 // cppm promised never to rewrite, so cppm cannot migrate them later. Changing
 // any of these breaks every existing project: that is what this test guards.
 func TestPublicInterfaceIsStable(t *testing.T) {
-	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil)
 	for _, name := range []string{
 		"function(cppm_link_dependencies",
 		"CPPM_TARGETS_fmt",
@@ -43,7 +43,7 @@ func TestPublicInterfaceIsStable(t *testing.T) {
 // Everything that is not public must be visibly private, so users do not come
 // to depend on it.
 func TestPrivateNamesArePrefixed(t *testing.T) {
-	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil)
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "set(") {
@@ -68,7 +68,7 @@ func TestPrivateNamesArePrefixed(t *testing.T) {
 // Emitting them afterwards silently does nothing, and every dependency then
 // builds its own tests and examples.
 func TestOptionsArePlacedBeforeDeclare(t *testing.T) {
-	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil)
 	optIdx := strings.Index(out, "FMT_TEST")
 	declIdx := strings.Index(out, "FetchContent_Declare(fmt")
 	availIdx := strings.Index(out, "FetchContent_MakeAvailable")
@@ -84,7 +84,7 @@ func TestOptionsArePlacedBeforeDeclare(t *testing.T) {
 }
 
 func TestVersionGatedKeywords(t *testing.T) {
-	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil)
 	// SYSTEM is 3.25+, EXCLUDE_FROM_ALL is 3.28+, but the generated floor is
 	// 3.24, so both must be behind a version check rather than emitted directly.
 	if !strings.Contains(out, "VERSION_GREATER_EQUAL 3.25") {
@@ -96,22 +96,22 @@ func TestVersionGatedKeywords(t *testing.T) {
 }
 
 func TestDeterministicOutput(t *testing.T) {
-	first := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
+	first := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil)
 	for i := 0; i < 10; i++ {
-		if again := Managed(manifest.New("MyApp", 20), sampleLock(), "test"); again != first {
+		if again := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil); again != first {
 			t.Fatalf("output differs between runs on iteration %d", i)
 		}
 	}
 }
 
 func TestBannerPresent(t *testing.T) {
-	if !strings.Contains(Managed(manifest.New("MyApp", 20), sampleLock(), "test"), "DO NOT EDIT") {
+	if !strings.Contains(Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil), "DO NOT EDIT") {
 		t.Error("generated file must carry a do-not-edit banner")
 	}
 }
 
 func TestEmptyLockStillProducesUsableFile(t *testing.T) {
-	out := Managed(manifest.New("MyApp", 20), lockfile.New("test"), "test")
+	out := Managed(manifest.New("MyApp", 20), lockfile.New("test"), "test", nil)
 	// A project with no dependencies still includes this file, so the linking
 	// function must exist or every fresh project fails to configure.
 	if !strings.Contains(out, "function(cppm_link_dependencies") {
@@ -134,7 +134,7 @@ func TestQuotingEscapesMetacharacters(t *testing.T) {
 		Commit:  "0000000000000000000000000000000000000000",
 		Options: map[string]string{"X": `a"b${Y}\c`},
 	})
-	out := Managed(manifest.New("MyApp", 20), l, "test")
+	out := Managed(manifest.New("MyApp", 20), l, "test", nil)
 
 	optLine := findLine(t, out, "set(X ")
 	if !strings.Contains(optLine, `\"`) {
@@ -169,7 +169,7 @@ func findLine(t *testing.T, out, substr string) string {
 // editing cppm.json and running sync actually changes the build.
 func TestManagedSetsLanguageSettings(t *testing.T) {
 	m := manifest.New("MyApp", 26)
-	out := Managed(m, lockfile.New("t"), "t")
+	out := Managed(m, lockfile.New("t"), "t", nil)
 	if !strings.Contains(out, "set(CMAKE_CXX_STANDARD 26)") {
 		t.Error("standard must be written into the generated include")
 	}
@@ -210,7 +210,7 @@ func TestCompilerGoesIntoPresetsNotTheInclude(t *testing.T) {
 	m.Toolchain.CXX = "clang++"
 	m.Toolchain.C = "clang"
 
-	if strings.Contains(Managed(m, lockfile.New("t"), "t"), "CMAKE_CXX_COMPILER") {
+	if strings.Contains(Managed(m, lockfile.New("t"), "t", nil), "CMAKE_CXX_COMPILER") {
 		t.Error("the compiler must not be set in the generated include; it runs after project()")
 	}
 	out, err := Presets(m)
@@ -276,7 +276,7 @@ func TestPathDependencyUsesAddSubdirectory(t *testing.T) {
 		Path:    "../MyLib",
 		Targets: []string{"MyLib"},
 	})
-	out := Managed(manifest.New("MyApp", 20), l, "test")
+	out := Managed(manifest.New("MyApp", 20), l, "test", nil)
 	if !strings.Contains(out, "add_subdirectory") {
 		t.Error("path dependencies should use add_subdirectory, not FetchContent")
 	}
@@ -318,7 +318,7 @@ func withTests() *manifest.Manifest {
 // cppm_link_dependencies() links by default, so a dev dependency appearing in it
 // would compile a test framework into a release binary.
 func TestDevDependencyIsNotInCppmDependencies(t *testing.T) {
-	out := Managed(withTests(), devLock(), "test")
+	out := Managed(withTests(), devLock(), "test", nil)
 
 	if !strings.Contains(out, "list(APPEND CPPM_DEPENDENCIES fmt)") {
 		t.Error("a normal dependency must be appended to CPPM_DEPENDENCIES")
@@ -341,7 +341,7 @@ func TestDevDependencyIsNotInCppmDependencies(t *testing.T) {
 // A dev dependency reaches the test target through the generated function, not
 // through an edit to CMakeLists.txt, because cppm never rewrites that file.
 func TestTestTargetsReceiveDevDependencies(t *testing.T) {
-	out := Managed(withTests(), devLock(), "test")
+	out := Managed(withTests(), devLock(), "test", nil)
 	if !strings.Contains(out, "set(_cppm_test_targets MyApp_tests)") {
 		t.Fatalf("test targets were not declared to the generated include:\n%s", out)
 	}
@@ -353,7 +353,7 @@ func TestTestTargetsReceiveDevDependencies(t *testing.T) {
 // A project with no test target must still produce a valid file: the variable
 // has to exist, because the function dereferences it unconditionally.
 func TestTestTargetListIsAlwaysDefined(t *testing.T) {
-	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test")
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil)
 	if !strings.Contains(out, `set(_cppm_test_targets "")`) {
 		t.Error("_cppm_test_targets must be defined even with no test targets")
 	}
@@ -364,7 +364,7 @@ func TestTestTargetListIsAlwaysDefined(t *testing.T) {
 // dependencies would add every dependency's test suite to the build -- the same
 // failure mode as emitting cache options after FetchContent_Declare.
 func TestCTestComesAfterTheDependencies(t *testing.T) {
-	out := Managed(withTests(), devLock(), "test")
+	out := Managed(withTests(), devLock(), "test", nil)
 
 	ctest := strings.Index(out, "include(CTest)")
 	available := strings.Index(out, "FetchContent_MakeAvailable(")
@@ -394,7 +394,7 @@ func TestCTestComesAfterTheDependencies(t *testing.T) {
 // A cppm project consumed through add_subdirectory must not switch testing on
 // in its parent.
 func TestCTestIsGuardedToTheTopLevelProject(t *testing.T) {
-	out := Managed(withTests(), devLock(), "test")
+	out := Managed(withTests(), devLock(), "test", nil)
 	idx := strings.Index(out, "include(CTest)")
 	if idx < 0 {
 		t.Fatal("include(CTest) is missing")
@@ -486,4 +486,97 @@ func TestPresetsCarryTestPresets(t *testing.T) {
 			t.Errorf("test preset %q should print output on failure", tp.Name)
 		}
 	}
+}
+
+// --- sourceGlobs ---------------------------------------------------------
+
+func globManifest() *manifest.Manifest {
+	m := manifest.New("MyApp", 20)
+	t := m.Targets["MyApp"]
+	t.SourceGlobs = []string{"src/net"}
+	m.Targets["MyApp"] = t
+	return m
+}
+
+// A project with no patterns must produce exactly what it produced before the
+// feature existed: no stray variables, and no deferred call.
+func TestManagedOmitsSourceBlockWithoutGlobs(t *testing.T) {
+	out := Managed(manifest.New("MyApp", 20), sampleLock(), "test", nil)
+	for _, s := range []string{"_cppm_glob_targets", "cmake_language(DEFER", "target_sources"} {
+		if strings.Contains(out, s) {
+			t.Errorf("a project with no sourceGlobs must not emit %q", s)
+		}
+	}
+}
+
+func TestManagedAttachesGlobbedSourcesToTheTarget(t *testing.T) {
+	out := Managed(globManifest(), sampleLock(), "test", GlobbedSources{
+		"MyApp": {"src/net/resolver.cpp", "src/net/socket.cpp"},
+	})
+
+	for _, want := range []string{
+		"set(_cppm_glob_targets MyApp)",
+		`"${CMAKE_CURRENT_SOURCE_DIR}/src/net/socket.cpp"`,
+		"target_sources(${_cppm_gt} PRIVATE ${_cppm_glob_sources_${_cppm_gt}})",
+		"cmake_language(DEFER CALL _cppm_apply_globbed_sources)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated CMake is missing %q", want)
+		}
+	}
+
+	// The whole point of deferring: the include runs before add_executable(),
+	// so a direct call would fail on a target that does not exist yet.
+	deferAt := strings.Index(out, "cmake_language(DEFER CALL")
+	fnAt := strings.Index(out, "function(_cppm_apply_globbed_sources)")
+	if fnAt < 0 || deferAt < fnAt {
+		t.Error("the deferred function must be defined before it is deferred")
+	}
+}
+
+// An empty entry would make the generated FATAL_ERROR fire for a target that
+// merely matched no files, so sync must leave such a target out entirely.
+func TestManagedIgnoresTargetsWithNoMatchedFiles(t *testing.T) {
+	out := Managed(globManifest(), sampleLock(), "test", GlobbedSources{"MyApp": {}})
+	if strings.Contains(out, "_cppm_glob_targets") {
+		t.Error("a target whose patterns matched nothing must not reach the generated CMake")
+	}
+}
+
+func TestManagedSourceBlockIsDeterministic(t *testing.T) {
+	g := GlobbedSources{"MyApp": {"src/net/a.cpp", "src/net/b.cpp"}}
+	first := Managed(globManifest(), sampleLock(), "test", g)
+	for i := 0; i < 5; i++ {
+		if again := Managed(globManifest(), sampleLock(), "test", g); again != first {
+			t.Fatal("regenerating with the same input produced different output")
+		}
+	}
+}
+
+// The error has to name the file to edit and the command to run: cppm's users
+// do not know CMake, and a target that vanished from CMakeLists.txt is the one
+// way this feature breaks.
+func TestManagedSourceBlockExplainsAMissingTarget(t *testing.T) {
+	out := Managed(globManifest(), sampleLock(), "test", GlobbedSources{"MyApp": {"src/net/a.cpp"}})
+	i := strings.Index(out, "FATAL_ERROR")
+	for i >= 0 {
+		block := out[i:]
+		if end := strings.Index(block, "endif()"); end > 0 {
+			block = block[:end]
+		}
+		if strings.Contains(block, "sourceGlobs") {
+			for _, want := range []string{"CMakeLists.txt", "add_executable", "cppm sources remove"} {
+				if !strings.Contains(block, want) {
+					t.Errorf("the missing-target error does not mention %q", want)
+				}
+			}
+			return
+		}
+		next := strings.Index(out[i+1:], "FATAL_ERROR")
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	t.Error("no FATAL_ERROR covers a target that sourceGlobs names but CMakeLists.txt does not define")
 }

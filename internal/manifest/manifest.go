@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/mehdi-shokohi/cppm/internal/atomicfile"
+	"github.com/mehdi-shokohi/cppm/internal/sources"
 )
 
 // FileName is the manifest's fixed name, found by walking up from the cwd.
@@ -156,8 +157,18 @@ func CompanionC(cxx string) string {
 
 // Target is a build target cppm scaffolds. v1 generates exactly one.
 type Target struct {
-	Kind         string   `json:"kind"`
-	Sources      []string `json:"sources"`
+	Kind    string   `json:"kind"`
+	Sources []string `json:"sources"`
+
+	// SourceGlobs are patterns expanded by `cppm sync` and attached to the
+	// target by the generated CMake, which is the only way cppm can add a
+	// source file without editing CMakeLists.txt.
+	//
+	// Sources above stays the authoritative list of what CMakeLists.txt itself
+	// names; these are additions cppm owns. Keeping them in separate fields is
+	// what lets `cppm sources` report honestly which files came from where.
+	SourceGlobs []string `json:"sourceGlobs,omitempty"`
+
 	Dependencies []string `json:"dependencies,omitempty"`
 
 	// Test marks the target as a test executable: `cppm init --with-tests`
@@ -344,8 +355,13 @@ func (m *Manifest) Validate() error {
 		default:
 			return fmt.Errorf("target %q: invalid kind %q (expected %q or %q)", name, t.Kind, KindExecutable, KindLibrary)
 		}
-		if len(t.Sources) == 0 {
-			return fmt.Errorf("target %q: at least one source is required", name)
+		if len(t.Sources) == 0 && len(t.SourceGlobs) == 0 {
+			return fmt.Errorf("target %q: at least one entry in \"sources\" or \"sourceGlobs\" is required", name)
+		}
+		for _, g := range t.SourceGlobs {
+			if err := sources.Validate(g); err != nil {
+				return fmt.Errorf("target %q: %w", name, err)
+			}
 		}
 		for _, d := range t.Dependencies {
 			dep, ok := m.Dependencies[d]

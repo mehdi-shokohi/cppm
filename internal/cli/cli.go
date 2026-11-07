@@ -46,9 +46,11 @@ func register(c *Command) { commands = append(commands, c) }
 func init() {
 	register(cmdInit())
 	register(cmdAdd())
+	register(cmdInstall())
 	register(cmdRemove())
 	register(cmdUpdate())
 	register(cmdSync())
+	register(cmdSources())
 	register(cmdBuild())
 	register(cmdTest())
 	register(cmdList())
@@ -169,6 +171,9 @@ getting started:
     cppm init MyApp
     cd MyApp
     cppm build
+
+in a project you just cloned:
+    cppm install
 `)
 }
 

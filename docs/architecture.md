@@ -220,6 +220,38 @@ dev dependency required a new line in that file, `cppm add --dev` could not work
 dependency would be fetched and then linked to nothing. Routing it through the generated function is
 the only mechanism available.
 
+`cppm sources` is the second feature that had to be routed around the same obstacle, and it is worth
+recording that it needed **no** new public name either. Patterns go in `cppm.json` under
+`targets.<name>.sourceGlobs`; `sync` expands them in Go and the generated file attaches the result
+with
+
+```cmake
+cmake_language(DEFER CALL _cppm_apply_globbed_sources)
+```
+
+The deferral is the whole trick. The generated file is included *before* the user's
+`add_executable()` — it has to be, because the C++ standard and the dependencies must be set
+first — so a direct `target_sources()` would run against a target that does not exist yet.
+`cmake_language(DEFER)` runs the call at the end of the including directory instead, by which time
+the target is there. The alternative was a `CPPM_SOURCES_<target>` variable for `CMakeLists.txt` to
+reference, which would have been a fifth name in a file cppm can never migrate.
+
+Two choices inside that feature are easy to get wrong later:
+
+- **The expansion happens in Go at sync time, not in `file(GLOB)` at configure time.** A
+  configure-time glob makes the set of translation units depend on what was on disk at that moment
+  and leaves no trace in a diff; without `CONFIGURE_DEPENDS` it is not even re-evaluated. The cost
+  is that a file created since the last sync is not compiled until the next one, which `cppm build`
+  does anyway.
+- **A target whose patterns matched nothing is left out of the generated file entirely**, rather
+  than emitted with an empty list. The generated code raises a `FATAL_ERROR` for a target it was
+  told about but cannot find in `CMakeLists.txt`, and an empty entry would turn that useful error
+  into a false alarm.
+
+`.cppm/` and `build/` are excluded from every walk. Without that, a pattern as ordinary as
+`**/*.cpp` would compile every dependency's sources into the user's own target — a build that
+succeeds and is wrong, which is the failure mode §2 exists to prevent.
+
 ---
 
 ## 6. Package layout
