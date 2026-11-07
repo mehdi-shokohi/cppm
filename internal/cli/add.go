@@ -23,6 +23,7 @@ type addOpts struct {
 	dev           bool
 	noInteractive bool
 	noDiscover    bool
+	noSubmodules  bool
 	forceReplace  bool
 }
 
@@ -35,6 +36,7 @@ func cmdAdd() *Command {
 		fs.BoolVar(&o.dev, "dev", false, "needed only by the tests; never linked into a shipping target")
 		fs.BoolVar(&o.noInteractive, "non-interactive", false, "never prompt; record unresolved targets instead")
 		fs.BoolVar(&o.noDiscover, "no-discover", false, "do not download the source to look for targets")
+		fs.BoolVar(&o.noSubmodules, "no-submodules", false, "do not fetch the dependency's git submodules while inspecting it")
 		fs.BoolVar(&o.forceReplace, "force", false, "replace an existing dependency of the same name")
 		return fs, o
 	}
@@ -289,7 +291,9 @@ func resolveTargets(git *vcs.Client, s vcs.Spec, res vcs.Resolution, o *addOpts)
 		fmt.Printf("  warning: could not fetch source (%v); targets left unresolved\n", err)
 		return nil, lockfile.OriginUnresolved, nil, ""
 	}
-	scan, err := discover.Scan(dir, s.Name)
+
+	subs := fetchSubmodules(git, dir, s.Name, o.noSubmodules)
+	scan, err := discover.ScanOpts(dir, s.Name, discover.Options{Submodules: submodulePaths(subs)})
 	if err != nil {
 		return nil, lockfile.OriginUnresolved, nil, ""
 	}
@@ -306,6 +310,56 @@ func resolveTargets(git *vcs.Client, s vcs.Spec, res vcs.Resolution, o *addOpts)
 		return nil, lockfile.OriginUnresolved, nil, why
 	}
 	return []string{scan.Best}, lockfile.OriginInferred, nil, ""
+}
+
+// fetchSubmodules populates the inspected checkout's submodules and reports
+// what could not be fetched.
+//
+// The warning matters more than the fetch does. CMake's FetchContent updates
+// submodules itself at configure time, so an unreachable one fails the build
+// with a wall of git and CMake output ending in "Failed to update submodules"
+// -- after the dependency has already been added and a full clone downloaded.
+// Fetching here means cppm hits the same wall first, while it is still holding
+// the user's attention and can name the repository that failed.
+func fetchSubmodules(git *vcs.Client, dir, name string, skip bool) vcs.Submodules {
+	if skip {
+		return vcs.Submodules{}
+	}
+	subs, err := git.InitSubmodules(dir)
+	if err != nil {
+		// Reading .gitmodules failed, which says nothing about the package.
+		return vcs.Submodules{}
+	}
+	if len(subs.Declared) > 0 {
+		fmt.Printf("  %d git submodule(s) declared\n", len(subs.Declared))
+	}
+	if len(subs.Missing) == 0 {
+		return subs
+	}
+
+	fmt.Printf("\n  warning: %d of %s's submodules could not be fetched:\n", len(subs.Missing), name)
+	for _, m := range subs.Missing {
+		fmt.Printf("             %s\n", m.Path)
+		if m.URL != "" {
+			fmt.Printf("               %s\n", m.URL)
+		}
+	}
+	fmt.Printf("           cppm added the dependency anyway, but 'cppm build' fetches the same\n")
+	fmt.Printf("           submodules through CMake, so expect it to fail the same way.\n")
+	fmt.Printf("           if that host is blocked or rate-limiting you, a git mirror fixes both:\n")
+	if len(subs.Missing) > 0 && subs.Missing[0].URL != "" {
+		fmt.Printf("               git config --global url.<reachable-mirror>.insteadOf %s\n", subs.Missing[0].URL)
+	}
+	fmt.Printf("           a ref of %s that does not need the submodule works too.\n\n", name)
+	return subs
+}
+
+func submodulePaths(subs vcs.Submodules) []string {
+	var out []string
+	for _, s := range subs.Declared {
+		out = append(out, s.Path)
+	}
+	return out
 }
 
 // chooseRef handles `cppm add <repo>` with no ref.

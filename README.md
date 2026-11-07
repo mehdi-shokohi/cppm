@@ -162,6 +162,43 @@ targets:  unresolved
 
 An inferred name is always labelled as inferred, never presented as fact.
 
+### Libraries that use git submodules
+
+They work, and you do not have to do anything. CMake's `FetchContent` initialises a dependency's
+submodules recursively by itself, and the pin on the superproject's commit pins the submodules
+too — their commits are recorded inside that commit's tree.
+
+`cppm add` also fetches them into its own cache while inspecting the library, for one reason: so it
+can tell you *now* if one is unreachable. Otherwise the first sign is a wall of git and CMake output
+ending in `Failed to update submodules`, after the dependency is already added and the clone
+downloaded:
+
+```
+  2 git submodule(s) declared
+
+  warning: 1 of drogon's submodules could not be fetched:
+             third_party/eric-hpack-core
+               https://gitlab.com/joe1231231218/eric-hpack-core.git
+           cppm added the dependency anyway, but 'cppm build' fetches the same
+           submodules through CMake, so expect it to fail the same way.
+```
+
+A submodule host that is blocked or rate-limiting you is the usual cause, and a mirror fixes it for
+both cppm and CMake, because both just run `git`:
+
+```bash
+git config --global url.<reachable-mirror>.insteadOf https://gitlab.com/owner/repo.git
+```
+
+One unreachable submodule does not cost you the others — `git submodule update` stops at the first
+failure, so cppm retries the rest one at a time.
+
+Targets defined *inside* a submodule are never offered as the library's own. A submodule is another
+package vendored in, so its targets are not what you link this one for.
+
+`cppm add --no-submodules` skips the fetch, which is worth it for a library with large submodules
+you know you do not need inspected.
+
 ### Dev-only dependencies
 
 Catch2, googletest, doctest and benchmark exist to build the tests, not the product. `--dev` keeps

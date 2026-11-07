@@ -17,6 +17,7 @@ type installOpts struct {
 	release       bool
 	noInteractive bool
 	noDiscover    bool
+	noSubmodules  bool
 }
 
 func cmdInstall() *Command {
@@ -27,6 +28,7 @@ func cmdInstall() *Command {
 		fs.BoolVar(&o.release, "release", false, "configure the release preset instead of debug")
 		fs.BoolVar(&o.noInteractive, "non-interactive", false, "never prompt; record unresolved targets instead")
 		fs.BoolVar(&o.noDiscover, "no-discover", false, "do not scan a new dependency's CMake for target names")
+		fs.BoolVar(&o.noSubmodules, "no-submodules", false, "do not fetch a new dependency's git submodules while inspecting it")
 		return fs, o
 	}
 	return &Command{
@@ -170,6 +172,7 @@ func resolveMissingPins(p *project.Project, o *installOpts) ([]string, error) {
 			dev:           dep.Dev,
 			noInteractive: o.noInteractive,
 			noDiscover:    o.noDiscover,
+			noSubmodules:  o.noSubmodules,
 		}
 		targets, origin, options, notes := resolveTargets(git, s, res, ao)
 		if len(dep.Options) > 0 {

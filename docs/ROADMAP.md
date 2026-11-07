@@ -128,6 +128,7 @@ Two gaps that every new user hit in the first ten minutes, neither of which is a
 |---|---|
 | 0.2.3 `cppm install` | **done** — `v0.2.3` |
 | 0.2.4 `cppm sources` | **done** — `v0.2.3` |
+| 0.2.5 Git submodules | **done** — `v0.2.3` |
 
 ### 0.2.3 `cppm install` — what to run after cloning — **done**
 
@@ -192,6 +193,47 @@ dev dependencies, and like that one it added **no** new public CMake name.
   `CMakeLists.txt` names and is still read by `init` alone; keeping them apart is what lets
   `cppm sources` report honestly which files came from where, and lets the generated file skip the
   ones already listed.
+
+### 0.2.5 Git submodules — **done**
+
+Reported from a real `cppm add github:drogonframework/drogon@v1.10.0-beta.3`, which configured for
+several minutes and then died in a wall of git output ending `Failed to update submodules`: one of
+drogon's two submodules, `third_party/eric-hpack-core`, lives on a GitLab host that answers 403 from
+some networks.
+
+Nothing was wrong with what cppm generated. `FetchContent` initialises a dependency's submodules
+recursively on its own, which is why no `GIT_SUBMODULES` keyword is emitted, and the superproject
+pin covers the submodule commits already — they are recorded in its tree. What was wrong was
+*when* the user found out, and that discovery had been scanning a tree with empty submodule
+directories all along.
+
+`cppm add` now fetches submodules into its own cache while inspecting a dependency, reports any it
+could not get, and hands the paths to discovery. Four things learned, all of them non-obvious:
+
+- **`git submodule update` stops at the first failure and leaves the rest untouched.** In drogon,
+  `third_party/eric-hpack-core` sorts ahead of `trantor`, so the one submodule discovery actually
+  needs was never fetched. cppm retries per submodule after a bulk failure, and verified against
+  drogon itself: `trantor/` ends up fully populated while the 403 one stays empty.
+- **A retry after that abort exits 0 and does nothing.** The abort happens between the clone phase
+  and the checkout phase, so the stranded submodules have the right recorded HEAD and an empty
+  worktree; `submodule update` sees HEAD matching and considers them done. `--force` is required to
+  get the checkout. Safe here, because this is cppm's commit-keyed cache and nothing edits it.
+  Three test fixtures passed for the wrong reason before this was understood.
+- **Populating submodules feeds a whole vendored package into target discovery**, and the
+  name-based `skipDirs` list cannot catch it: drogon vendors trantor at `trantor/`, which looks
+  like ordinary source. Without a guard, `trantor` and everything trantor vendors become candidates
+  for drogon — the same fault as recommending its IMPORTED targets, which 0.2.2.1 fixed.
+  `discover.Options.Submodules` excludes them, on the principle that a submodule is by construction
+  a different package.
+- **A `.gitmodules` path is upstream's text, not cppm's.** Paths that are absolute, climb out of
+  the checkout, or begin with `-` are dropped, and every git call that takes one puts it after
+  `--`. Constraint 5 is about argv, and this is argv that arrives from a third party.
+
+Not done, and deliberately: no `GIT_SUBMODULES` control in the manifest to skip a broken submodule
+at build time. It would not have helped the reported case — drogon compiles
+`third_party/eric-hpack-core/hpack.cpp` unconditionally, so skipping the submodule only moves the
+failure to a missing source file. It is worth adding for a library whose broken submodule is
+genuinely optional, and nothing here forecloses it.
 
 ---
 

@@ -320,6 +320,153 @@ func (c *Client) FetchSource(repoURL, commit, dest string) (shallow bool, err er
 	return true, nil
 }
 
+// Submodule is one entry from a checkout's .gitmodules.
+type Submodule struct {
+	// Path is relative to the checkout root, slash-separated.
+	Path string
+	// URL is where git would clone it from. Reported to the user because the
+	// host is the actionable part when a fetch fails.
+	URL string
+}
+
+// Submodules reports what a checkout declares and what is actually there.
+type Submodules struct {
+	Declared []Submodule
+	// Missing are declared but still empty after the attempt, because the fetch
+	// failed. Not an error: see InitSubmodules.
+	Missing []Submodule
+}
+
+// InitSubmodules populates a checkout's submodules, best effort.
+//
+// Best effort is the whole point, and it is not laziness. A failure here must
+// not stop `cppm add`: the fetch exists to inspect CMake files, and a
+// dependency whose submodule is unreachable is still worth adding -- the user
+// may be behind a proxy that CMake will later be given, or the submodule may
+// hold nothing but that package's own test fixtures. What the caller gets
+// instead is the list of what is missing, which is enough to warn that the
+// build will try the same fetch and may fail the same way.
+//
+// Submodules are fetched at depth 1 first, then fully, mirroring FetchSource:
+// a submodule is pinned to a commit that is often not any branch's tip, and
+// not every server allows fetching such a commit shallowly.
+func (c *Client) InitSubmodules(dest string) (Submodules, error) {
+	var out Submodules
+
+	if _, err := os.Stat(filepath.Join(dest, ".gitmodules")); err != nil {
+		return out, nil // the overwhelmingly common case
+	}
+	declared, err := c.declaredSubmodules(dest)
+	if err != nil {
+		return out, err
+	}
+	out.Declared = declared
+	if len(declared) == 0 {
+		return out, nil
+	}
+
+	if err := c.updateSubmodules(dest, false); err != nil {
+		// `submodule update` stops at the first failure and leaves the rest
+		// untouched, so one unreachable submodule costs all the others. drogon
+		// is exactly this: third_party/eric-hpack-core is unreachable from some
+		// networks and sorts ahead of trantor, which is the one whose CMake
+		// discovery actually needs to resolve. Retrying one at a time means a
+		// single bad entry only costs itself.
+		for _, s := range declared {
+			_ = c.updateSubmodules(dest, true, s.Path)
+		}
+	}
+
+	for _, s := range declared {
+		if !isPopulated(filepath.Join(dest, filepath.FromSlash(s.Path))) {
+			out.Missing = append(out.Missing, s)
+		}
+	}
+	return out, nil
+}
+
+// updateSubmodules runs one `submodule update`, shallow first then full.
+//
+// Shallow fails when the pinned commit is not at a branch tip and the server
+// does not allow fetching an arbitrary commit, which is the same hazard
+// FetchSource handles for the superproject.
+//
+// paths, when given, limit the update. They are passed after "--" because a
+// path from .gitmodules is upstream's text, not cppm's: git must read it as a
+// path and never as an option.
+//
+// force is needed for the per-path retry, and the reason is subtle enough to
+// be worth stating. When a bulk update aborts partway, the submodules it had
+// already cloned are left checked out at nothing -- git clones them with no
+// worktree first and performs the checkouts afterwards, which never happens.
+// Their recorded HEAD is already correct, so a plain retry exits 0 having done
+// nothing and the directory stays empty. --force makes git check out the
+// commit regardless. Discarding "local changes" is safe here because this
+// checkout is cppm's commit-keyed cache, which nothing edits.
+func (c *Client) updateSubmodules(dest string, force bool, paths ...string) error {
+	base := []string{"submodule", "update", "--init", "--recursive"}
+	if force {
+		base = append(base, "--force")
+	}
+	var tail []string
+	if len(paths) > 0 {
+		tail = append([]string{"--"}, paths...)
+	}
+
+	shallow := append(append(append([]string{}, base...), "--depth", "1"), tail...)
+	if _, err := c.run(dest, shallow...); err == nil {
+		return nil
+	}
+	full := append(append([]string{}, base...), tail...)
+	_, err := c.run(dest, full...)
+	return err
+}
+
+// declaredSubmodules reads .gitmodules with git itself rather than parsing it.
+//
+// The file is git config syntax, which has escaping rules not worth
+// reimplementing, and `git config --file` cannot execute anything from it.
+func (c *Client) declaredSubmodules(dest string) ([]Submodule, error) {
+	out, err := c.run(dest, "config", "--file", ".gitmodules", "--get-regexp", `^submodule\..*\.path$`)
+	if err != nil {
+		// A .gitmodules with no path entries is malformed upstream, not a cppm
+		// problem, and nothing can be fetched from it.
+		return nil, nil
+	}
+	var subs []Submodule
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		key, path, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || path == "" {
+			continue
+		}
+		// A path that climbs out of the checkout would have git write outside
+		// the cache directory. git refuses this itself, but cppm hands these
+		// paths to its own file walks, so it must not trust them either.
+		// A leading "-" would be read as an option by any git command that
+		// takes this path, which is why every call site also uses "--".
+		if filepath.IsAbs(path) || strings.HasPrefix(path, "-") ||
+			path == ".." || strings.HasPrefix(path, "../") ||
+			strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "submodule."), ".path")
+		url, _ := c.run(dest, "config", "--file", ".gitmodules", "--get", "submodule."+name+".url")
+		subs = append(subs, Submodule{
+			Path: filepath.ToSlash(path),
+			URL:  strings.TrimSpace(url),
+		})
+	}
+	sort.Slice(subs, func(i, j int) bool { return subs[i].Path < subs[j].Path })
+	return subs, nil
+}
+
+// isPopulated reports whether dir holds anything. A submodule whose fetch
+// failed is left as an empty directory.
+func isPopulated(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) > 0
+}
+
 // isCheckout reports whether dest already holds the given commit checked out.
 func isCheckout(dest, commit string) (bool, error) {
 	if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {

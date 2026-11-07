@@ -129,7 +129,31 @@ var demoteMarkers = []string{
 // own project() name is discovered and used as a second alias, which is what
 // makes nlohmann_json::nlohmann_json reachable from a dependency called "json".
 func Scan(root, pkgName string) (Result, error) {
-	files, err := readCMakeFiles(root)
+	return ScanOpts(root, pkgName, Options{})
+}
+
+// Options narrows a scan with what only the caller can know.
+type Options struct {
+	// Submodules are git submodule paths relative to root, slash-separated.
+	//
+	// Their CMake is excluded from the scan, because a submodule is by
+	// construction a *different* package vendored into this one, and its
+	// targets are never what a consumer links this package for. The name-based
+	// skipDirs list cannot stand in for this: drogon vendors trantor at
+	// "trantor/", which looks like nothing special, and scanning it would
+	// offer trantor and everything trantor itself vendors as candidates for
+	// drogon -- the exact fault that "Stop discovery recommending a
+	// dependency's own dependencies" fixed for IMPORTED targets.
+	//
+	// Empty means the caller does not know, which is how it was before
+	// submodules were fetched at all: an unpopulated submodule directory is
+	// empty, so the effect is the same.
+	Submodules []string
+}
+
+// ScanOpts is Scan with caller-supplied context.
+func ScanOpts(root, pkgName string, o Options) (Result, error) {
+	files, err := readCMakeFiles(root, o.Submodules)
 	if err != nil {
 		return Result{}, err
 	}
@@ -213,7 +237,7 @@ type cmakeFile struct {
 	text string
 }
 
-func readCMakeFiles(root string) ([]cmakeFile, error) {
+func readCMakeFiles(root string, submodules []string) ([]cmakeFile, error) {
 	var files []cmakeFile
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -230,7 +254,7 @@ func readCMakeFiles(root string) ([]cmakeFile, error) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil || skipDir(rel) {
+		if relErr != nil || skipDir(rel) || inSubmodule(rel, submodules) {
 			return nil
 		}
 		b, readErr := os.ReadFile(path)
@@ -248,6 +272,21 @@ func readCMakeFiles(root string) ([]cmakeFile, error) {
 		return strings.Count(files[i].rel, "/") < strings.Count(files[j].rel, "/")
 	})
 	return files, nil
+}
+
+// inSubmodule reports whether rel lies inside one of the given submodule paths.
+func inSubmodule(rel string, submodules []string) bool {
+	p := filepath.ToSlash(rel)
+	for _, sub := range submodules {
+		sub = strings.Trim(filepath.ToSlash(sub), "/")
+		if sub == "" {
+			continue
+		}
+		if p == sub || strings.HasPrefix(p, sub+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func skipDir(rel string) bool {

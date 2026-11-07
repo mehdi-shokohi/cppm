@@ -451,3 +451,83 @@ add_subdirectory(sub)
 		t.Errorf("Unrelated = false, want true (why: %q)", res.Why)
 	}
 }
+
+// Fetching a dependency's git submodules makes a whole vendored package's
+// CMake visible to the scanner. drogon is the case: it vendors trantor at
+// "trantor/", a path the skipDirs name list has no reason to suspect, and
+// trantor's targets are never what someone links drogon for. This is the same
+// class of fault as recommending a dependency's IMPORTED targets.
+func TestSubmoduleTargetsAreNotThisPackage(t *testing.T) {
+	files := map[string]string{
+		"CMakeLists.txt": `
+project(drogon)
+add_subdirectory(trantor)
+add_library(drogon)
+add_library(Drogon::Drogon ALIAS drogon)
+`,
+		"trantor/CMakeLists.txt": `
+project(trantor)
+add_library(trantor STATIC trantor/net/EventLoop.cc)
+add_library(Trantor::Trantor ALIAS trantor)
+`,
+	}
+	root := tree(t, files)
+
+	// Without the submodule list, trantor's targets are in the pool. This is
+	// the state that would ship if InitSubmodules were wired up on its own.
+	plain, err := Scan(root, "drogon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mentions(plain, "trantor") {
+		t.Skip("scanner no longer surfaces nested targets; the guard below is then moot")
+	}
+
+	res, err := ScanOpts(root, "drogon", Options{Submodules: []string{"trantor"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mentions(res, "trantor") {
+		t.Errorf("a submodule's targets must not be candidates for the parent package: %v", names(res))
+	}
+	if res.Best != "Drogon::Drogon" {
+		t.Errorf("Best = %q, want Drogon::Drogon", res.Best)
+	}
+	if !res.Confident {
+		t.Error("drogon's own namespaced alias should still resolve confidently")
+	}
+}
+
+// A submodule path must not match by prefix alone: "trantor" excluding
+// "trantor-extras/" would silently drop the package's own code.
+func TestSubmoduleExclusionMatchesWholePathSegments(t *testing.T) {
+	if inSubmodule("trantor-extras/CMakeLists.txt", []string{"trantor"}) {
+		t.Error("trantor-extras/ is not inside trantor/")
+	}
+	if !inSubmodule("trantor/CMakeLists.txt", []string{"trantor"}) {
+		t.Error("trantor/CMakeLists.txt is inside trantor/")
+	}
+	if !inSubmodule("third_party/sub/x.cmake", []string{"third_party/sub"}) {
+		t.Error("a nested submodule path must match too")
+	}
+	if inSubmodule("CMakeLists.txt", nil) {
+		t.Error("no submodules means nothing is excluded")
+	}
+}
+
+func names(r Result) []string {
+	var out []string
+	for _, c := range r.Candidates {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
+func mentions(r Result, want string) bool {
+	for _, c := range r.Candidates {
+		if c.Name == want || c.Name == "Trantor::Trantor" {
+			return true
+		}
+	}
+	return r.Best == want
+}
