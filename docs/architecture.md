@@ -248,6 +248,71 @@ Two choices inside that feature are easy to get wrong later:
   told about but cannot find in `CMakeLists.txt`, and an empty entry would turn that useful error
   into a false alarm.
 
+The `"safety"` block — warnings and release hardening — is the third feature through the same
+deferral, and it adds the one distinction worth stating plainly, because the rest of v0.3 turns on
+it:
+
+**Where a flag is applied is a correctness question, not a style one.**
+
+| Flags | Applied | Why |
+|---|---|---|
+| warnings, hardening | `target_compile_options(<your target> PRIVATE ...)`, deferred | a dependency's warnings are not the user's bug, and `-Werror` on fmt means an upstream release can stop a build the user did not change |
+| sanitizers | `CMAKE_CXX_FLAGS` and the linker flags, **before** the dependencies | ASan and TSan instrument the whole program or they are unreliable; an uninstrumented dependency makes TSan report races whose synchronisation it cannot see |
+
+`add_compile_options()` in the generated include applies to the current directory *and every
+directory added below it*, and `FetchContent` brings every dependency in as a subdirectory. So the
+same call is exactly right for a sanitizer and exactly wrong for a warning level. `SYSTEM` on the
+`FetchContent_Declare` does not close the gap: it suppresses warnings raised by a dependency's
+*headers* inside the user's translation units, and does nothing about flags in force while the
+dependency's own sources compile.
+
+Two mechanics inside the hardening half that are easy to get wrong:
+
+- **Unportable flags are put to the compiler, not written down.** `-fstack-clash-protection` is
+  x86/s390x only, `-fcf-protection` is x86 only, and both GCC and Clang *reject* them on aarch64
+  rather than ignoring them; Apple's linker rejects `-z` outright. Each goes through
+  `check_cxx_compiler_flag` / `check_linker_flag`, cached in `CMakeCache.txt`.
+- **A generator expression must not contain a literal `;`.** It is applied through an unquoted
+  `${...}` expansion, which splits on the semicolon and leaves two fragments that are not flags.
+  `_FORTIFY_SOURCE`'s `-U` and `-D` are therefore two genexes, not one.
+
+The sanitizer half adds one more structural rule: **the preset carries a name, not flags.** A
+sanitizer preset sets the private cache variable `_cppm_sanitize` and nothing else; the generated
+include turns that into flags. Writing the flags into `cacheVariables` directly — which is the
+obvious design, and what the roadmap originally sketched — cannot satisfy the MSVC case, because
+only CMake knows which compiler is in use and MSVC implements `/fsanitize=address` and nothing
+else. A preset carrying `-fsanitize=thread` reaches it as an unrecognised option rather than as a
+refusal that names the preset. The same indirection keeps every compiler-family flag table in
+`internal/safety`.
+
+Two more things in that section are load-bearing in a way the code cannot show:
+
+- **`MEMORYCHECK_*` must be set before `include(CTest)`.** The CTest module reads those variables to
+  write `DartConfiguration.tcl`, which is the only thing `ctest -T memcheck` looks at. Setting them
+  afterwards is inert — the same class of mistake as a cache option emitted after
+  `FetchContent_Declare`, with the same symptom: a memcheck run with no valgrind in it.
+- **`find_program` must not write into `MEMORYCHECK_COMMAND`.** When valgrind is absent that leaves
+  the cache entry `NOTFOUND`, and the CTest module then runs its own `find_program` over the same
+  variable, whose `NAMES` list includes NVIDIA's `compute-sanitizer`. On a machine with the CUDA
+  toolkit that produces `MEMORYCHECK_COMMAND=compute-sanitizer` beside
+  `MEMORYCHECK_TYPE=Valgrind`, and `ctest -T memcheck` runs the wrong tool with valgrind's options.
+- **`ctest --preset <p> -T memcheck` does not run in the preset's binary directory.** `-T memcheck`
+  is a dashboard action: it reads `DartConfiguration.tcl` from the current directory, and cppm runs
+  ctest from the project root so `--preset` can find `CMakePresets.json`. Without `--test-dir`,
+  ctest finds no `DartConfiguration.tcl`, prints "No tests were found!!!" and exits **0** — a clean
+  memcheck pass with nothing checked. cppm passes both flags and then checks that CTest wrote the
+  per-test `MemoryChecker.*.log`, because a silent success is the one failure mode a bug-finding
+  tool may not have.
+
+**A dependency can overrule a whole-program flag, which is why `internal/safety` also scans.**
+Setting `CMAKE_CXX_FLAGS` before the dependencies reaches them, but it does not have the last word:
+a dependency is free to append flags of its own, and duckdb does — `ENABLE_SANITIZER` and
+`ENABLE_UBSAN` both default ON and append `-fsanitize=address` to `CMAKE_CXX_FLAGS_DEBUG`. That
+happens in duckdb's own directory scope, which the parent cannot inspect, so there is nothing for
+the generated CMake to check. `ScanInjectedSanitizers` reads the dependency's CMake files instead
+and walks backwards, nesting-aware, to the enclosing `if()` that names the option to turn off. The
+general shape of the rule: *reaching a dependency is not the same as having the last word on it.*
+
 `.cppm/` and `build/` are excluded from every walk. Without that, a pattern as ordinary as
 `**/*.cpp` would compile every dependency's sources into the user's own target — a build that
 succeeds and is wrong, which is the failure mode §2 exists to prevent.
@@ -267,6 +332,8 @@ internal/
 ├── discover/          scan, resolve variables, veto, rank, confidence gate
 ├── recipes/           embedded curated database (go:embed) + user overrides
 ├── cmakegen/          CMakeLists template, presets, the managed include
+├── safety/            warning, hardening and sanitizer flag tables, by compiler
+│                     family; valgrind tool options; dependency-flag scanning
 ├── toolchain/         locates cmake/ninja/git/compiler; runs them
 ├── atomicfile/        write-temp-and-rename
 └── e2e/               drives the real binary against real CMake

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/mehdi-shokohi/cppm/internal/safety"
 )
 
 func TestNewIsValid(t *testing.T) {
@@ -323,5 +325,91 @@ func TestDevAndTestRoundTrip(t *testing.T) {
 	}
 	if !got.Targets["MyApp_tests"].Test {
 		t.Error("test was lost in the round trip")
+	}
+}
+
+// A new project spells the safety block out at its defaults, for the same
+// reason the cmake block is spelled out: "how do I turn the warnings up" should
+// be answerable by reading cppm.json, not by reading the documentation.
+func TestNewWritesTheSafetyBlockExplicitly(t *testing.T) {
+	b, err := New("MyApp", 20).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	for _, want := range []string{`"safety"`, `"warnings": "default"`, `"hardening": true`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("a new manifest should spell out %s:\n%s", want, out)
+		}
+	}
+}
+
+// A manifest written before the safety block existed must stay byte-identical
+// through a load and save. These files are committed, so adding a block to
+// somebody's manifest the next time they run 'cppm add' would put an unasked-for
+// change in their diff.
+func TestAbsentSafetyBlockStaysAbsent(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Safety = nil
+	b, err := m.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "safety") {
+		t.Errorf("an absent safety block must not be serialised:\n%s", b)
+	}
+	// And it must still produce the defaults rather than nothing.
+	if m.WarningLevel() != safety.DefaultWarnings {
+		t.Errorf("WarningLevel() = %q with no block, want %q", m.WarningLevel(), safety.DefaultWarnings)
+	}
+	if !m.Harden() {
+		t.Error("Harden() must default to true with no safety block")
+	}
+}
+
+// An absent hardening field means "default", which is on. A plain bool could
+// not tell that apart from a deliberate false, which would silently drop the
+// hardening from any manifest that set only the warning level.
+func TestAbsentHardeningMeansDefaultNotFalse(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Safety = &Safety{Warnings: safety.WarningsStrict}
+	if !m.Harden() {
+		t.Error("hardening must default to on when only the warning level is set")
+	}
+	no := false
+	m.Safety.Hardening = &no
+	if m.Harden() {
+		t.Error("an explicit false must be honoured")
+	}
+}
+
+// A typo in the level has to be rejected at load, because the alternative is a
+// project that builds with warnings the user believes are on.
+func TestValidateRejectsUnknownWarningLevel(t *testing.T) {
+	m := New("MyApp", 20)
+	m.Safety = &Safety{Warnings: "pedantic"}
+	err := m.Validate()
+	if err == nil {
+		t.Fatal("an unknown warnings level must be rejected")
+	}
+	// The message has to name the alternatives: cppm's users do not know the
+	// flags, so "invalid value" leaves them with nothing to do.
+	for _, want := range []string{"pedantic", safety.WarningsStrict} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
+	}
+
+	// Every level cppm documents must pass.
+	for _, level := range safety.WarningLevels {
+		m.Safety = &Safety{Warnings: level}
+		if err := m.Validate(); err != nil {
+			t.Errorf("level %q is documented but rejected: %v", level, err)
+		}
+	}
+	// An empty string means "unset", not "invalid".
+	m.Safety = &Safety{}
+	if err := m.Validate(); err != nil {
+		t.Errorf("an empty warnings field must mean unset: %v", err)
 	}
 }

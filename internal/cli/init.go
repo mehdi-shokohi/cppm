@@ -12,6 +12,7 @@ import (
 	"github.com/mehdi-shokohi/cppm/internal/cmakegen"
 	"github.com/mehdi-shokohi/cppm/internal/lockfile"
 	"github.com/mehdi-shokohi/cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/safety"
 	"github.com/mehdi-shokohi/cppm/internal/toolchain"
 )
 
@@ -53,6 +54,7 @@ Written files:
     CMakeLists.txt      yours after this point -- cppm never rewrites it
     CMakePresets.json   debug and release presets
     src/main.cpp        a hello-world
+    valgrind.supp       commented suppressions file, for 'cppm test --memcheck'
     .gitignore
     .cppm/              generated files             (git-ignored)
 
@@ -213,6 +215,11 @@ func runInit(dir string, o *initOpts) error {
 		{"CMakeLists.txt", cmakegen.CMakeLists(m)},
 		{mainSource, cmakegen.MainCPP(name)},
 		{".gitignore", cmakegen.GitIgnore()},
+		// Scaffolded explained-but-empty rather than left out. The first
+		// 'cppm test --memcheck' on any real project reports errors inside
+		// glibc that are not the user's to fix, and somebody who does not know
+		// suppressions exist concludes the tool is broken or their code is.
+		{safety.SuppressionsFile, cmakegen.ValgrindSupp()},
 		{filepath.Join("include", ".gitkeep"), ""},
 	}
 	if o.withTests {

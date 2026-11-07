@@ -8,6 +8,7 @@ import (
 	"github.com/mehdi-shokohi/cppm/internal/cmakegen"
 	"github.com/mehdi-shokohi/cppm/internal/manifest"
 	"github.com/mehdi-shokohi/cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/safety"
 	"github.com/mehdi-shokohi/cppm/internal/toolchain"
 )
 
@@ -99,6 +100,15 @@ func toolchainChecks() []check {
 			"required to fetch dependencies; CMake's FetchContent shells out to git too"})
 	}
 
+	// Optional, and reported as such: valgrind is effectively Linux-only, so a
+	// macOS or Windows user needs to be told what to use instead rather than
+	// just that it is absent.
+	if vg := toolchain.Valgrind(); vg.Found() {
+		out = append(out, check{"valgrind", statusOK, fmt.Sprintf("%s at %s", vg.Version, vg.Path), ""})
+	} else {
+		out = append(out, check{"valgrind", statusWarn, "not found in PATH", valgrindDoctorHint()})
+	}
+
 	if cc := toolchain.Compiler(); cc.Found() {
 		out = append(out, check{"c++ compiler", statusOK, fmt.Sprintf("%s %s at %s", cc.Name, cc.Version, cc.Path), ""})
 	} else {
@@ -106,6 +116,21 @@ func toolchainChecks() []check {
 			"install a C++ toolchain, or set CXX to your compiler"})
 	}
 	return out
+}
+
+// valgrindDoctorHint is the one-line form of the install hint.
+//
+// One line because the hint column is indented to the width of the longest
+// check name, which a wrapped string cannot know.
+func valgrindDoctorHint() string {
+	switch {
+	case isWindows():
+		return "valgrind does not run on Windows; use 'cppm test --sanitize=asan+ubsan' and '--sanitize=tsan'"
+	case isDarwin():
+		return "valgrind is broken on Apple Silicon; use 'cppm test --sanitize=asan+ubsan' and '--sanitize=tsan'"
+	default:
+		return "optional: 'apt install valgrind' enables 'cppm test --memcheck' and '--helgrind'"
+	}
 }
 
 // toolchainRequestChecks validates the compiler and generator the project asks
@@ -208,6 +233,38 @@ func cmakeProjectName(content string) string {
 	return ""
 }
 
+// safetyCheck reports the warning level and hardening the project builds with.
+//
+// Reported rather than judged, with one exception. "How hard is this project
+// being compiled" is otherwise only answerable by reading the generated CMake,
+// and a project that quietly has its warnings off is the state this whole
+// feature exists to prevent.
+func safetyCheck(p *project.Project) check {
+	level := p.Manifest.WarningLevel()
+	hardening := "hardening off"
+	if p.Manifest.Harden() {
+		hardening = "hardening on"
+	}
+	detail := fmt.Sprintf("warnings %s, %s", level, hardening)
+
+	// The hints are one line each on purpose: the hint column is indented to
+	// the width of the longest check name, which is not known here, so a
+	// wrapped hint would align correctly only by coincidence.
+	if level == safety.WarningsOff {
+		return check{"safety", statusWarn, detail,
+			"the compiler is reporting nothing; try 'cppm build --warnings=default'"}
+	}
+	// -Werror committed to cppm.json means a new compiler release can stop
+	// this project building without a line of it changing. Worth saying once,
+	// not worth failing over -- it is a legitimate choice for a project that
+	// pins its compiler.
+	if level == safety.WarningsError {
+		return check{"safety", statusWarn, detail,
+			"a new compiler release can now stop this project building; prefer \"strict\" in cppm.json and --warnings=error in CI"}
+	}
+	return check{"safety", statusOK, detail, ""}
+}
+
 func projectChecks() []check {
 	p, err := project.Open(mustCwd())
 	if err != nil {
@@ -240,6 +297,8 @@ func projectChecks() []check {
 	} else {
 		out = append(out, check{"generated cmake", statusOK, relTo(p.Root, p.ManagedCMakePath()), ""})
 	}
+
+	out = append(out, safetyCheck(p))
 
 	// CMAKE_CXX_EXTENSIONS defaults to ON in CMake, which silently compiles the
 	// project as gnu++NN and leaves dependencies on mixed dialects. CMakeLists

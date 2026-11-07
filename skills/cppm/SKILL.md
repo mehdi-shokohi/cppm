@@ -119,8 +119,13 @@ Syncs, configures and builds, by wrapping `cmake --preset` and `cmake --build --
 | `--jobs <n>` | parallel jobs (default: let the backend decide) |
 | `--target <s>` | build only this target |
 | `--verbose` | show the compiler command lines |
+| `--warnings <level>` | `off`, `default`, `strict` or `error`, for this build only |
+| `--sanitize <name>` | `asan`, `ubsan`, `asan+ubsan` or `tsan`; builds into `build/<name>/` |
 
-Output lands in `build/debug/` or `build/release/`.
+Output lands in `build/debug/`, `build/release/` or `build/<sanitizer>/`.
+
+`--release` and `--sanitize` are mutually exclusive: a sanitizer build has its own tree and its own
+`-g -O1`.
 
 ### cppm test
 
@@ -137,6 +142,14 @@ against a stale build tree reports on code that is no longer there.
 | `--list` | list the tests without running them |
 | `--no-build` | do not build first; test whatever is in the build tree |
 | `--fail-fast` | stop at the first failing test |
+| `--warnings <level>` | `off`, `default`, `strict` or `error`, for this run only |
+| `--sanitize <name>` | `asan`, `ubsan`, `asan+ubsan` or `tsan` — recompiles, 5-15x slower |
+| `--memcheck` | valgrind: leaks, invalid reads/writes, uninitialised values |
+| `--helgrind` | valgrind: data races AND lock-order violations |
+| `--drd` | valgrind: lighter thread checker |
+| `--massif` | valgrind: heap profiler |
+| `--cachegrind` | valgrind: cache and branch-prediction profiler |
+| `--gen-suppressions` | with a valgrind tool, print ready-made `valgrind.supp` entries |
 
 Failing tests always print their own output; the generated test presets set `outputOnFailure`.
 
@@ -227,12 +240,63 @@ The C++ standard, compiler, generator and build types all live in `cppm.json`:
   "cxx":       { "standard": 20, "required": true, "extensions": false },
   "cmake":     { "minimum": "3.24", "exportCompileCommands": true,
                  "buildTypes": { "debug": "Debug", "release": "RelWithDebInfo" } },
-  "toolchain": { "cxx": "g++", "c": "gcc", "generator": "Ninja" }
+  "toolchain": { "cxx": "g++", "c": "gcc", "generator": "Ninja" },
+  "safety":    { "warnings": "default", "hardening": true }
 }
 ```
 
 Setting `CMAKE_CXX_STANDARD` in `CMakeLists.txt` after the cppm include **silently overrides**
 `cppm.json` and makes `cppm sync` appear to do nothing. `cppm doctor` warns about this.
+
+### Warnings and hardening
+
+`"safety"` controls how hard the compiler looks at the project's own code. Levels are `off`,
+`default` (`-Wall -Wextra`), `strict` (adds `-Wshadow -Wconversion -Wold-style-cast` and more) and
+`error` (`strict` plus `-Werror`). `hardening` adds `_GLIBCXX_ASSERTIONS`, `_FORTIFY_SOURCE` in
+optimised builds, the stack protector and linker hardening, probing each flag for support first.
+
+Edit `cppm.json` and run `cppm sync` to keep a level. Use `cppm build --warnings=strict` to try one
+without changing the project; that is not written to `cppm.json`.
+
+Two things not to do:
+
+- **Do not set warning flags in `CMakeLists.txt` with `add_compile_options()`.** It applies to every
+  dependency `FetchContent` adds below it, so `-Werror` lands on fmt and spdlog. Use `"safety"`, or
+  `target_compile_options(<target> PRIVATE ...)` on your own target.
+- **Do not recommend `error` as a project default.** A new compiler release can introduce a warning
+  the code did not change to earn. It is a CI level.
+
+### Sanitizers and valgrind
+
+Two mechanisms for memory bugs and data races. Recommend the sanitizers first: they are faster, have
+fewer false positives, and need no extra tool.
+
+```bash
+cppm test --sanitize=asan+ubsan   # memory errors and undefined behaviour
+cppm test --sanitize=tsan         # data races and lock-order inversions
+cppm test --memcheck              # valgrind: leaks + uninitialised reads, no recompile
+cppm test --helgrind              # valgrind: thorough lock-order checking
+```
+
+Each sanitizer gets its own build tree (`build/asan/`, `build/tsan/`, …) and `cppm test` also sets
+the runtime options that make a sanitizer error fail the test instead of printing and carrying on.
+
+What to tell a user, and what not to do:
+
+- **Use `--memcheck` for uninitialised-memory reads.** Neither ASan nor UBSan finds those. The
+  sanitizer for it is MSan, which cppm does not offer because it needs libc++ itself instrumented.
+- **Use `--memcheck` for a leak hunt**, and read the categories: *definitely lost* is a real leak,
+  *still reachable* is usually a cache or a global and usually harmless.
+- **Use `--massif` for "why is this using so much memory"** — it attributes every heap byte to the
+  call stack that allocated it. It is a profiler, not a checker: it reports no verdict.
+- **Never suggest combining a sanitizer with valgrind**, or ASan with TSan. cppm refuses both, and
+  the reason is the same in each case: they intercept the same allocations.
+- **Do not add sanitizer flags to `CMakeLists.txt` by hand.** They must be in the link flags as well
+  as the compile flags, and they must reach the dependencies — which is what `--sanitize` does and
+  what a `target_compile_options` call does not.
+- **If a dependency injects its own sanitizer** (duckdb's `ENABLE_SANITIZER` defaults ON), cppm
+  refuses the build and names the option. Set it in `cppm.json` under that dependency's `"options"`
+  and run `cppm sync`.
 
 ### What you *should* edit in CMakeLists.txt
 
@@ -292,6 +356,7 @@ cppm already knows the right options for ~25 common libraries, so this is usuall
 | Path | Owner | Commit it |
 |---|---|---|
 | `cppm.json` | you | yes |
+| `valgrind.supp` | you | no, scaffolded once by `init` |
 | `cppm.lock` | cppm | yes — it pins commits for reproducible builds |
 | `CMakeLists.txt` | **you** | yes — cppm never rewrites it |
 | `tests/` | you | yes — scaffolded by `--with-tests`, then yours |

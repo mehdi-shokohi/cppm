@@ -22,6 +22,7 @@ import (
 
 	"github.com/mehdi-shokohi/cppm/internal/lockfile"
 	"github.com/mehdi-shokohi/cppm/internal/manifest"
+	"github.com/mehdi-shokohi/cppm/internal/safety"
 )
 
 // DoNotEditBanner heads every generated file.
@@ -376,6 +377,8 @@ func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string, globbed
 	b.WriteString("    list(APPEND _cppm_fc_keywords EXCLUDE_FROM_ALL)\n")
 	b.WriteString("endif()\n\n")
 
+	writeSanitizers(&b)
+
 	// ---- dependency classification ----
 	b.WriteString("# CPPM_DEPENDENCIES holds the dependencies that ship. It is what\n")
 	b.WriteString("# cppm_link_dependencies() links when called with no dependency list.\n")
@@ -477,6 +480,7 @@ func Managed(m *manifest.Manifest, l *lockfile.Lock, cppmVersion string, globbed
 	}
 
 	writeGlobbedSources(&b, m, globbed)
+	writeSafety(&b, m)
 
 	// Verification. Because target names are partly inferred, a clear failure
 	// here is a primary user experience rather than an edge case.
@@ -532,13 +536,23 @@ function(cppm_link_dependencies _cppm_link_target)
     endforeach()
 endfunction()
 
-# ---------------------------------------------------------------------------
+`)
+
+	// Before include(CTest), and that is not cosmetic: the CTest module reads
+	// the MEMORYCHECK_* variables to write DartConfiguration.tcl, which is the
+	// only thing `ctest -T memcheck` looks at. Setting them afterwards is
+	// inert, and the failure is a memcheck run that silently runs the tests
+	// with no valgrind at all -- the same class of mistake as emitting a cache
+	// option after FetchContent_Declare.
+	writeValgrind(&b)
+
+	b.WriteString(`# ---------------------------------------------------------------------------
 # Testing
 #
 # The CTest module, rather than a bare enable_testing(): it also writes the
-# DartConfiguration.tcl that 'ctest -T memcheck' reads, which is how valgrind
-# gets wired in later. It defines BUILD_TESTING and defaults it to ON, so
-# -DBUILD_TESTING=OFF turns the whole test tree off.
+# DartConfiguration.tcl that 'ctest -T memcheck' reads, which is how the
+# valgrind section above reaches ctest. It defines BUILD_TESTING and defaults
+# it to ON, so -DBUILD_TESTING=OFF turns the whole test tree off.
 #
 # This sits at the END of this file, after the dependencies, and the order is
 # load-bearing: a great many libraries build their own test suites when
@@ -630,8 +644,13 @@ cmake_language(DEFER CALL _cppm_apply_globbed_sources)
 
 // preset mirrors the subset of CMakePresets.json that cppm generates.
 type preset struct {
-	Name           string            `json:"name"`
-	DisplayName    string            `json:"displayName,omitempty"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	// Description is the only place a preset can carry an explanation:
+	// CMakePresets.json is JSON and takes no comments. `cmake --list-presets`
+	// prints it, which is how somebody discovers the sanitizer presets without
+	// reading cppm's documentation first.
+	Description    string            `json:"description,omitempty"`
 	Generator      string            `json:"generator,omitempty"`
 	BinaryDir      string            `json:"binaryDir,omitempty"`
 	CacheVariables map[string]string `json:"cacheVariables,omitempty"`
@@ -665,6 +684,12 @@ type testPreset struct {
 	// Visual Studio and Xcode ignore CMAKE_BUILD_TYPE and pick at test time.
 	Configuration string      `json:"configuration,omitempty"`
 	Output        *testOutput `json:"output,omitempty"`
+	// Environment carries the sanitizer runtime options. They belong on the
+	// test preset rather than the configure preset because they are read by
+	// the process under test, not by the compiler -- and because a sanitizer
+	// that reports and carries on lets a suite pass with the bug in it, so
+	// halt_on_error is as load-bearing as the compile flags.
+	Environment map[string]string `json:"environment,omitempty"`
 }
 
 // testOutput configures what CTest prints.
@@ -720,6 +745,74 @@ func Presets(m *manifest.Manifest) (string, error) {
 			CacheVariables: cv,
 		}
 	}
+	// A sanitizer preset deliberately sets no CMAKE_BUILD_TYPE, and three
+	// things follow from that, all of them wanted.
+	//
+	// The sanitizer flags carry -g -O1 themselves, which is Google's own
+	// recommendation for ASan: readable stack traces, several times faster
+	// than -O0. A build type would overrule it -- Debug's -O0 and
+	// RelWithDebInfo's -O2 both come after CMAKE_CXX_FLAGS on the command
+	// line, so whichever the build type names wins.
+	//
+	// No build type also means no -DNDEBUG, so assert() stays live, which is
+	// what you want while hunting a bug; and it means the _FORTIFY_SOURCE
+	// genex in the safety section evaluates to nothing, which matters because
+	// fortified libc calls hide the very overflows ASan is there to catch.
+	mkSan := func(s safety.Sanitizer) preset {
+		cv := map[string]string{safety.SanitizerCacheVar: s.Name}
+		if m.CMake.WantCompileCommands() {
+			cv["CMAKE_EXPORT_COMPILE_COMMANDS"] = "ON"
+		}
+		for k, v := range cache {
+			cv[k] = v
+		}
+		return preset{
+			Name: s.Name,
+			// The summary goes in displayName because that is the field
+			// `cmake --list-presets` prints. It is how somebody finds these
+			// without reading cppm's documentation first; description is set
+			// too, for the IDEs that show it instead.
+			DisplayName:    s.Summary,
+			Description:    s.Summary,
+			Generator:      m.Toolchain.Generator,
+			BinaryDir:      "${sourceDir}/build/" + s.Name,
+			CacheVariables: cv,
+		}
+	}
+
+	configures := []preset{mk("debug", "Debug"), mk("release", "Release")}
+	builds := []buildPreset{
+		{Name: "debug", ConfigurePreset: "debug", Configuration: m.CMake.BuildTypeFor("debug")},
+		{Name: "release", ConfigurePreset: "release", Configuration: m.CMake.BuildTypeFor("release")},
+	}
+	tests := []testPreset{
+		{Name: "debug", ConfigurePreset: "debug", Configuration: m.CMake.BuildTypeFor("debug"),
+			Output: &testOutput{OutputOnFailure: true}},
+		{Name: "release", ConfigurePreset: "release", Configuration: m.CMake.BuildTypeFor("release"),
+			Output: &testOutput{OutputOnFailure: true}},
+	}
+	// One build tree per sanitizer, never shared with debug. Mixing
+	// instrumented and uninstrumented objects in one tree links successfully
+	// and then crashes inside the sanitizer's own runtime, which is a long way
+	// from the bug the user was looking for.
+	for _, name := range safety.Sanitizers {
+		s, ok := safety.FindSanitizer(name)
+		if !ok {
+			continue
+		}
+		configures = append(configures, mkSan(s))
+		// Debug for the multi-config generators only, which ignore
+		// CMAKE_BUILD_TYPE and pick at build time; single-config generators
+		// ignore this field, so it costs nothing where the comment above
+		// applies.
+		builds = append(builds, buildPreset{Name: s.Name, ConfigurePreset: s.Name, Configuration: "Debug"})
+		tests = append(tests, testPreset{
+			Name: s.Name, ConfigurePreset: s.Name, Configuration: "Debug",
+			Output:      &testOutput{OutputOnFailure: true},
+			Environment: s.Env,
+		})
+	}
+
 	major, minor, patch := parseVersionTriple(m.CMake.Minimum)
 	pf := presetsFile{
 		Version:              3,
@@ -731,20 +824,9 @@ func Presets(m *manifest.Manifest) (string, error) {
 				Note:      "Generated from cppm.json by 'cppm sync'. Put your own presets in CMakePresets.json's sibling CMakeUserPresets.json, which cppm never touches.",
 			},
 		},
-		ConfigurePresets: []preset{
-			mk("debug", "Debug"),
-			mk("release", "Release"),
-		},
-		BuildPresets: []buildPreset{
-			{Name: "debug", ConfigurePreset: "debug", Configuration: m.CMake.BuildTypeFor("debug")},
-			{Name: "release", ConfigurePreset: "release", Configuration: m.CMake.BuildTypeFor("release")},
-		},
-		TestPresets: []testPreset{
-			{Name: "debug", ConfigurePreset: "debug", Configuration: m.CMake.BuildTypeFor("debug"),
-				Output: &testOutput{OutputOnFailure: true}},
-			{Name: "release", ConfigurePreset: "release", Configuration: m.CMake.BuildTypeFor("release"),
-				Output: &testOutput{OutputOnFailure: true}},
-		},
+		ConfigurePresets: configures,
+		BuildPresets:     builds,
+		TestPresets:      tests,
 	}
 	b, err := json.MarshalIndent(pf, "", "  ")
 	if err != nil {
@@ -803,4 +885,462 @@ func parseVersionTriple(s string) (int, int, int) {
 		return 3, 24, 0
 	}
 	return major, minor, patch
+}
+
+// writeSafety emits the warning and hardening flags from cppm.json's "safety"
+// block and attaches them to the project's own targets.
+//
+// Three decisions, none of them cosmetic.
+//
+// Per target, not per directory. add_compile_options() at this point in the
+// file would set the flags for this directory and every directory added below
+// it -- which is every dependency, since FetchContent brings them in with
+// add_subdirectory(). The result is -Werror enforced on fmt and spdlog, where a
+// warning is not the user's bug and an upstream release can stop their build.
+// SYSTEM on the FetchContent declarations suppresses warnings from a
+// dependency's *headers*; it does nothing about flags applied when the
+// dependency's own sources are compiled, which is what this avoids.
+//
+// PRIVATE, not PUBLIC. A warning flag in a library's INTERFACE compile options
+// is inherited by everything that links it, so one strict library would turn
+// -Wconversion on across an entire dependent build.
+//
+// Deferred, like the globbed sources above, because this file is included
+// before the user's add_executable() runs -- it has to be, since the C++
+// standard and the dependencies must be set first. The alternative was a new
+// public variable for CMakeLists.txt to reference, which cppm could never
+// migrate later. See constraint 3 in CLAUDE.md.
+func writeSafety(b *strings.Builder, m *manifest.Manifest) {
+	level := m.WarningLevel()
+	harden := m.Harden()
+	if level == safety.WarningsOff && !harden {
+		return
+	}
+	targets := m.TargetNames()
+	if len(targets) == 0 {
+		return
+	}
+
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	b.WriteString("# Safety: warnings and hardening (from cppm.json \"safety\")\n")
+	b.WriteString("#\n")
+	fmt.Fprintf(b, "#     \"warnings\": %q", level)
+	if level == safety.WarningsOff {
+		b.WriteString("     -- no warning flags; the compiler's defaults apply\n")
+	} else {
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(b, "#     \"hardening\": %s\n", boolLiteral(harden))
+	b.WriteString("#\n")
+	b.WriteString("# Change the level in cppm.json and run 'cppm sync', or try one out with\n")
+	fmt.Fprintf(b, "#     cppm build --warnings=%s\n", safety.WarningsStrict)
+	b.WriteString("#\n")
+	b.WriteString("# These are applied per target with target_compile_options(... PRIVATE ...),\n")
+	b.WriteString("# which is load-bearing: add_compile_options() here would set them for this\n")
+	b.WriteString("# directory and every directory added below it -- and every dependency above\n")
+	b.WriteString("# is added by FetchContent as a subdirectory. -Werror would then be enforced\n")
+	b.WriteString("# on the dependencies, where a warning is not your bug and an upstream\n")
+	b.WriteString("# release can stop your build. PRIVATE keeps the flags from being inherited\n")
+	b.WriteString("# by anything that links a library from this project.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Only the targets cppm.json names are covered. A target you added to\n")
+	b.WriteString("# CMakeLists.txt by hand gets nothing from here: add it to \"targets\" in\n")
+	b.WriteString("# cppm.json, or set the options on it yourself.\n")
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	fmt.Fprintf(b, "set(_cppm_safety_targets %s)\n", strings.Join(targets, " "))
+	b.WriteString("set(_cppm_warning_options \"\")\n")
+	b.WriteString("set(_cppm_harden_options \"\")\n")
+	b.WriteString("set(_cppm_harden_link_options \"\")\n\n")
+
+	if level != safety.WarningsOff {
+		b.WriteString("# The level is what cppm.json stores; the flags are chosen here, so that a\n")
+		b.WriteString("# compiler switch in cppm.json needs no edit to the level.\n")
+		b.WriteString("if(MSVC)\n")
+		fmt.Fprintf(b, "    list(APPEND _cppm_warning_options %s)\n", strings.Join(safety.MSVCWarnings(level), " "))
+		b.WriteString("else()\n")
+		fmt.Fprintf(b, "    list(APPEND _cppm_warning_options\n        %s)\n", strings.Join(safety.GNUWarnings(level), "\n        "))
+		b.WriteString("endif()\n\n")
+	}
+
+	if harden {
+		writeHardening(b)
+	}
+
+	b.WriteString(`function(_cppm_apply_safety)
+    foreach(_cppm_st IN LISTS _cppm_safety_targets)
+        if(NOT TARGET ${_cppm_st})
+            # Not an error: cppm.json's target list is also read by other
+            # commands, and renaming a target in CMakeLists.txt is allowed.
+            # Silence would be worse, though -- it looks like the flags were
+            # applied and did nothing.
+            message(STATUS
+                "cppm: no target '${_cppm_st}' in this build, so the \"safety\" flags "
+                "were not applied to it. Rename it in cppm.json's \"targets\" to match "
+                "CMakeLists.txt.")
+            continue()
+        endif()
+        # An INTERFACE library has no sources of its own to compile, and
+        # target_compile_options() rejects PRIVATE on one outright.
+        get_target_property(_cppm_st_type ${_cppm_st} TYPE)
+        if(_cppm_st_type STREQUAL "INTERFACE_LIBRARY" OR _cppm_st_type STREQUAL "UTILITY")
+            continue()
+        endif()
+        if(_cppm_warning_options)
+            target_compile_options(${_cppm_st} PRIVATE ${_cppm_warning_options})
+        endif()
+        if(_cppm_harden_options)
+            target_compile_options(${_cppm_st} PRIVATE ${_cppm_harden_options})
+        endif()
+        if(_cppm_harden_link_options)
+            target_link_options(${_cppm_st} PRIVATE ${_cppm_harden_link_options})
+        endif()
+    endforeach()
+endfunction()
+
+cmake_language(DEFER CALL _cppm_apply_safety)
+
+`)
+}
+
+// writeHardening emits the hardening flags, probing the ones that are not
+// portable.
+//
+// The probes are the point of this block. -fstack-clash-protection is x86 and
+// s390x only and -fcf-protection is x86 only; both GCC and Clang reject them
+// outright on aarch64, so hardcoding them would mean cppm generates projects
+// that do not compile on an Apple M-series machine or a Raspberry Pi. The same
+// goes for -Wl,-z,relro: Apple's linker does not take -z at all.
+// check_cxx_compiler_flag answers per compiler and per target architecture and
+// caches the answer in CMakeCache.txt, so the cost is once per build tree.
+func writeHardening(b *strings.Builder) {
+	b.WriteString("# Hardening. Cheap at runtime, so it is on by default -- but almost none of\n")
+	b.WriteString("# it is portable, and the unsupported cases are hard errors rather than\n")
+	b.WriteString("# warnings: -fstack-clash-protection is x86/s390x only, -fcf-protection is\n")
+	b.WriteString("# x86 only, and Apple's linker rejects -z outright. So each flag is put to\n")
+	b.WriteString("# the compiler before it is used. The answers are cached in CMakeCache.txt,\n")
+	b.WriteString("# so this costs one configure, not one build.\n")
+	b.WriteString("include(CheckCXXCompilerFlag)\n")
+	b.WriteString("include(CheckLinkerFlag)\n\n")
+
+	b.WriteString(`function(_cppm_append_supported_compile_flag _cppm_out _cppm_flag)
+    string(MAKE_C_IDENTIFIER "_cppm_cxx_accepts${_cppm_flag}" _cppm_probe)
+    check_cxx_compiler_flag("${_cppm_flag}" ${_cppm_probe})
+    if(${_cppm_probe})
+        set(${_cppm_out} ${${_cppm_out}} "${_cppm_flag}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(_cppm_append_supported_link_flag _cppm_out _cppm_flag)
+    string(MAKE_C_IDENTIFIER "_cppm_link_accepts${_cppm_flag}" _cppm_probe)
+    check_linker_flag(CXX "${_cppm_flag}" ${_cppm_probe})
+    if(${_cppm_probe})
+        set(${_cppm_out} ${${_cppm_out}} "${_cppm_flag}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+`)
+
+	b.WriteString("if(MSVC)\n")
+	for _, f := range safety.MSVCHardenProbed {
+		fmt.Fprintf(b, "    _cppm_append_supported_compile_flag(_cppm_harden_options %s)\n", f)
+	}
+	b.WriteString("    # /guard:cf at compile time only emits the Control Flow Guard metadata.\n")
+	b.WriteString("    # Without /GUARD:CF at link time the image is never marked and Windows\n")
+	b.WriteString("    # enforces none of it, which is the usual way this gets half-done.\n")
+	for _, f := range safety.MSVCHardenLinkProbed {
+		fmt.Fprintf(b, "    _cppm_append_supported_link_flag(_cppm_harden_link_options %s)\n", f)
+	}
+	b.WriteString("else()\n")
+
+	b.WriteString("    # _GLIBCXX_ASSERTIONS bounds-checks std::vector::operator[], std::string\n")
+	b.WriteString("    # and the iterator ranges. It is ABI-compatible by design -- a translation\n")
+	b.WriteString("    # unit built with it links against one built without -- which is why it\n")
+	b.WriteString("    # can be switched on for your targets alone. _GLIBCXX_DEBUG, the heavier\n")
+	b.WriteString("    # one, is not: it changes the layout of std:: types and needs every\n")
+	b.WriteString("    # dependency rebuilt to match. libc++ ignores this define and has its own.\n")
+	fmt.Fprintf(b, "    list(APPEND _cppm_harden_options %s)\n\n", strings.Join(safety.GNUHardenDefines, " "))
+
+	b.WriteString("    # _FORTIFY_SOURCE needs two things nobody remembers. It is implemented in\n")
+	b.WriteString("    # glibc's headers via __builtin_object_size, which computes nothing until\n")
+	b.WriteString("    # the optimiser runs, so at -O0 it silently does nothing -- hence the\n")
+	b.WriteString("    # per-configuration genex rather than a plain flag. And the -U has to come\n")
+	b.WriteString("    # first, because Ubuntu, Fedora and SUSE already define it in their GCC\n")
+	b.WriteString("    # specs, where a bare -D warns \"macro redefined\" on every file compiled.\n")
+	b.WriteString("    #\n")
+	b.WriteString("    # The configurations are named rather than written as \"not Debug\": under a\n")
+	b.WriteString("    # multi-config generator the configuration can be empty, and \"not Debug\"\n")
+	b.WriteString("    # is true there -- applying the flag to exactly the unoptimised build it\n")
+	b.WriteString("    # does nothing in.\n")
+	fmt.Fprintf(b, "    set(_cppm_optimised \"%s\")\n", optimisedGenex())
+	b.WriteString("    # One genex per flag. A single \"$<cond:-U...;-D...>\" would carry a literal\n")
+	b.WriteString("    # semicolon, and the unquoted expansion below would split it in half.\n")
+	for _, f := range safety.GNUFortify {
+		fmt.Fprintf(b, "    list(APPEND _cppm_harden_options \"$<${_cppm_optimised}:%s>\")\n", f)
+	}
+	b.WriteString("\n")
+	for _, f := range safety.GNUHardenProbed {
+		fmt.Fprintf(b, "    _cppm_append_supported_compile_flag(_cppm_harden_options %s)\n", f)
+	}
+	b.WriteString("\n")
+	b.WriteString("    # -z relro -z now make the ELF relocation tables read-only once startup\n")
+	b.WriteString("    # is done, which closes the GOT-overwrite route to code execution.\n")
+	for _, f := range safety.GNUHardenLinkProbed {
+		fmt.Fprintf(b, "    _cppm_append_supported_link_flag(_cppm_harden_link_options %s)\n", f)
+	}
+	b.WriteString("endif()\n\n")
+}
+
+// optimisedGenex builds the generator expression that is true in exactly the
+// optimised configurations.
+func optimisedGenex() string {
+	parts := make([]string, 0, len(safety.OptimisedConfigs))
+	for _, c := range safety.OptimisedConfigs {
+		parts = append(parts, "$<CONFIG:"+c+">")
+	}
+	return "$<OR:" + strings.Join(parts, ",") + ">"
+}
+
+// boolLiteral renders a Go bool the way it appears in cppm.json, for the
+// generated file's header comment.
+func boolLiteral(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
+}
+
+// writeSanitizers emits the sanitizer flags for whichever sanitizer preset is
+// in use, and nothing at all for an ordinary build.
+//
+// This section is the mirror image of writeSafety, and the contrast is the
+// point. Warnings go on the project's own targets because a dependency's
+// warnings are not the user's bug. Sanitizers go in CMAKE_CXX_FLAGS *before*
+// the dependencies, because ASan and TSan instrument the whole program or they
+// are unreliable: an uninstrumented dependency makes TSan report races whose
+// synchronisation it cannot see, and gives ASan a memcpy it cannot check. The
+// same directory-scope mechanism is wrong in one case and required in the
+// other.
+//
+// The flags are chosen here rather than written into the preset -- a departure
+// from the roadmap's sketch -- because only CMake knows the compiler. MSVC can
+// do /fsanitize=address and nothing else, and a preset carrying
+// -fsanitize=thread would reach it as an unrecognised option instead of as the
+// clear refusal this has to be.
+func writeSanitizers(b *strings.Builder) {
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	b.WriteString("# Sanitizers\n")
+	b.WriteString("#\n")
+	b.WriteString("# Inert unless a sanitizer preset is in use:\n")
+	b.WriteString("#     cppm build --sanitize=asan+ubsan      cppm test --sanitize=tsan\n")
+	b.WriteString("#\n")
+	b.WriteString("# These go in CMAKE_CXX_FLAGS, before the dependencies above, and that is\n")
+	b.WriteString("# deliberate -- it is the opposite of what the warning flags below do.\n")
+	b.WriteString("# ASan and TSan have to instrument the whole program: an uninstrumented\n")
+	b.WriteString("# dependency gives ASan a memcpy it cannot check, and makes TSan report\n")
+	b.WriteString("# races whose synchronisation it cannot see. Because cppm builds every\n")
+	b.WriteString("# dependency from source in this tree, setting them here covers all of it.\n")
+	b.WriteString("#\n")
+	b.WriteString("# The link flags matter as much as the compile flags. A sanitizer compiled\n")
+	b.WriteString("# in but not linked fails with undefined references to __asan_* symbols,\n")
+	b.WriteString("# which is the most common way this gets half-done.\n")
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	fmt.Fprintf(b, "set(%s \"\" CACHE STRING \"sanitizer selected by 'cppm build --sanitize'; set by a cppm preset\")\n",
+		safety.SanitizerCacheVar)
+	fmt.Fprintf(b, "if(%s)\n", safety.SanitizerCacheVar)
+
+	b.WriteString("    set(_cppm_san_flags \"\")\n")
+
+	// An if/elseif chain with a trailing else, so the one sanitizer MSVC can
+	// do is named and everything else gets a single refusal carrying the name
+	// it was asked for. Three copies of the same message, one per sanitizer,
+	// is what the obvious loop produces.
+	b.WriteString("    if(MSVC)\n")
+	b.WriteString("        # MSVC implements AddressSanitizer and nothing else: no UBSan, no TSan.\n")
+	b.WriteString("        # Refused here rather than left to the compiler, which reports an\n")
+	b.WriteString("        # unrecognised option and names neither cppm nor the preset.\n")
+	keyword := "if"
+	for _, name := range safety.Sanitizers {
+		s, _ := safety.FindSanitizer(name)
+		if len(s.MSVCFlags) == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "        %s(%s STREQUAL %q)\n", keyword, safety.SanitizerCacheVar, name)
+		fmt.Fprintf(b, "            set(_cppm_san_flags \"%s\")\n", strings.Join(s.MSVCFlags, " "))
+		keyword = "elseif"
+	}
+	b.WriteString("        else()\n")
+	b.WriteString("            message(FATAL_ERROR\n")
+	fmt.Fprintf(b, "                \"cppm: --sanitize=${%s} is not available under MSVC.\\n\"\n", safety.SanitizerCacheVar)
+	b.WriteString("                \"MSVC implements AddressSanitizer only.\\n\"\n")
+	b.WriteString("                \"Use 'cppm build --sanitize=asan' here, or build with GCC or Clang to get\\n\"\n")
+	b.WriteString("                \"the others. Valgrind's helgrind would find data races without recompiling,\\n\"\n")
+	b.WriteString("                \"but valgrind does not run on Windows either.\")\n")
+	b.WriteString("        endif()\n")
+	b.WriteString("    else()\n")
+	keyword = "if"
+	for _, name := range safety.Sanitizers {
+		s, _ := safety.FindSanitizer(name)
+		fmt.Fprintf(b, "        %s(%s STREQUAL %q)\n", keyword, safety.SanitizerCacheVar, name)
+		fmt.Fprintf(b, "            set(_cppm_san_flags \"%s\")\n", strings.Join(s.GNUFlags, " "))
+		keyword = "elseif"
+	}
+	b.WriteString("        endif()\n")
+	b.WriteString("    endif()\n\n")
+
+	b.WriteString("    if(NOT _cppm_san_flags)\n")
+	fmt.Fprintf(b, "        message(FATAL_ERROR\n")
+	fmt.Fprintf(b, "            \"cppm: '${%s}' is not a sanitizer cppm knows.\\n\"\n", safety.SanitizerCacheVar)
+	fmt.Fprintf(b, "            \"Known: %s.\\n\"\n", strings.Join(safety.Sanitizers, ", "))
+	b.WriteString("            \"This variable is set by a cppm preset; configure with 'cppm build --sanitize=<name>'.\")\n")
+	b.WriteString("    endif()\n\n")
+
+	b.WriteString("    if(MSVC)\n")
+	b.WriteString("        # /RTC1 is in CMake's default MSVC Debug flags and MSVC rejects it\n")
+	b.WriteString("        # outright alongside /fsanitize=address. A multi-config generator picks\n")
+	b.WriteString("        # Debug for these presets, so the clash is the default case rather than\n")
+	b.WriteString("        # an edge one. Stripped per configuration because that is where CMake\n")
+	b.WriteString("        # puts it.\n")
+	b.WriteString("        foreach(_cppm_cfg DEBUG RELWITHDEBINFO RELEASE MINSIZEREL)\n")
+	b.WriteString("            string(REGEX REPLACE \"/RTC[^ ]*\" \"\" CMAKE_CXX_FLAGS_${_cppm_cfg} \"${CMAKE_CXX_FLAGS_${_cppm_cfg}}\")\n")
+	b.WriteString("            string(REGEX REPLACE \"/RTC[^ ]*\" \"\" CMAKE_C_FLAGS_${_cppm_cfg} \"${CMAKE_C_FLAGS_${_cppm_cfg}}\")\n")
+	b.WriteString("        endforeach()\n")
+	b.WriteString("    endif()\n\n")
+	b.WriteString("    # Appended, not assigned: a toolchain file or a preset may have put\n")
+	b.WriteString("    # something here that the build needs.\n")
+	b.WriteString("    set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} ${_cppm_san_flags}\")\n")
+	b.WriteString("    # C too, when it is enabled: dependencies routinely carry C sources\n")
+	b.WriteString("    # (zlib, glfw, SDL), and one uninstrumented C object is enough to give\n")
+	b.WriteString("    # ASan a region it does not know the bounds of.\n")
+	b.WriteString("    if(CMAKE_C_COMPILER)\n")
+	b.WriteString("        set(CMAKE_C_FLAGS \"${CMAKE_C_FLAGS} ${_cppm_san_flags}\")\n")
+	b.WriteString("    endif()\n")
+	b.WriteString("    foreach(_cppm_lf EXE SHARED MODULE)\n")
+	b.WriteString("        set(CMAKE_${_cppm_lf}_LINKER_FLAGS \"${CMAKE_${_cppm_lf}_LINKER_FLAGS} ${_cppm_san_flags}\")\n")
+	b.WriteString("    endforeach()\n\n")
+
+	b.WriteString("    # Said out loud, because a sanitizer build that silently was not one is\n")
+	b.WriteString("    # the worst outcome here: the suite passes and proves nothing.\n")
+	fmt.Fprintf(b, "    message(STATUS \"cppm: sanitizer ${%s} -- ${_cppm_san_flags}\")\n", safety.SanitizerCacheVar)
+	b.WriteString("endif()\n\n")
+}
+
+// writeValgrind wires CTest's memcheck support up to valgrind.
+//
+// CTest's own mechanism rather than a launcher of cppm's own: `ctest -T
+// memcheck` reads MEMORYCHECK_COMMAND out of the DartConfiguration.tcl that
+// include(CTest) writes, which is why the Testing section at the end of this
+// file uses the CTest module instead of a bare enable_testing().
+//
+// The tool and its options are overridden per run by `cppm test --helgrind` and
+// friends through `ctest --overwrite`, so what is set here is the default for
+// anyone running ctest by hand.
+func writeValgrind(b *strings.Builder) {
+	tool, _ := safety.FindValgrindTool(safety.ValMemcheck)
+
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	b.WriteString("# Valgrind, through CTest's memcheck support\n")
+	b.WriteString("#\n")
+	b.WriteString("#     cppm test --memcheck     leaks, invalid reads/writes, uninitialised values\n")
+	b.WriteString("#     cppm test --helgrind     data races AND lock-order violations\n")
+	b.WriteString("#     cppm test --drd          lighter thread checker\n")
+	b.WriteString("#\n")
+	b.WriteString("# No recompilation: the binary you already built runs under emulation, at\n")
+	b.WriteString("# 20-100x slower. Use TSan (--sanitize=tsan) for routine race checking and\n")
+	b.WriteString("# helgrind when you suspect a lock-order deadlock or cannot rebuild.\n")
+	b.WriteString("#\n")
+	b.WriteString("# --error-exitcode=1 is the option that makes any of this useful in CI.\n")
+	b.WriteString("# Without it valgrind reports the error, exits 0, and CTest records a pass:\n")
+	b.WriteString("# a green pipeline with a use-after-free in it.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Valgrind is not required. These are cache variables with no effect until\n")
+	b.WriteString("# 'ctest -T memcheck' runs, so a machine without valgrind is unaffected.\n")
+	b.WriteString("# ---------------------------------------------------------------------------\n")
+	b.WriteString("# Searched under a private name, then assigned. Using MEMORYCHECK_COMMAND\n")
+	b.WriteString("# as the find_program() output variable looks tidier and is a trap: when\n")
+	b.WriteString("# valgrind is absent this leaves the cache entry NOTFOUND, and the CTest\n")
+	b.WriteString("# module below then runs its own find_program over the same variable --\n")
+	b.WriteString("# whose NAMES list includes purify, drmemory and NVIDIA's compute-sanitizer.\n")
+	b.WriteString("# A machine with the CUDA toolkit installed therefore ends up with\n")
+	b.WriteString("# MEMORYCHECK_COMMAND=compute-sanitizer while MEMORYCHECK_TYPE still says\n")
+	b.WriteString("# Valgrind, and 'ctest -T memcheck' runs the wrong tool with valgrind's\n")
+	b.WriteString("# options. So nothing is claimed unless valgrind itself was found.\n")
+	b.WriteString("find_program(_cppm_valgrind NAMES valgrind)\n")
+	b.WriteString("if(_cppm_valgrind)\n")
+	b.WriteString("    # FORCE on these two because they must agree with each other: a command\n")
+	b.WriteString("    # and a type that disagree is the failure described above.\n")
+	b.WriteString("    set(MEMORYCHECK_COMMAND \"${_cppm_valgrind}\" CACHE FILEPATH \"valgrind, for 'ctest -T memcheck'\" FORCE)\n")
+	b.WriteString("    set(MEMORYCHECK_TYPE Valgrind CACHE STRING \"\" FORCE)\n")
+	b.WriteString("    # Not forced: these are defaults to edit. 'cppm test --memcheck' and\n")
+	b.WriteString("    # friends pass their own with 'ctest --overwrite' regardless.\n")
+	fmt.Fprintf(b, "    set(MEMORYCHECK_COMMAND_OPTIONS \"%s\"\n", strings.Join(tool.Options, " "))
+	b.WriteString("        CACHE STRING \"options passed to valgrind by 'ctest -T memcheck'\")\n")
+	b.WriteString("    # A suppressions file is almost always needed: a stock glibc, GTK or CUDA\n")
+	b.WriteString("    # produces memcheck output that is not yours to fix. 'cppm init' scaffolds\n")
+	b.WriteString("    # one; generate entries for what you actually see with\n")
+	b.WriteString("    # 'cppm test --memcheck --gen-suppressions'.\n")
+	fmt.Fprintf(b, "    if(EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/%s\")\n", safety.SuppressionsFile)
+	fmt.Fprintf(b, "        set(MEMORYCHECK_SUPPRESSIONS_FILE \"${CMAKE_CURRENT_SOURCE_DIR}/%s\"\n", safety.SuppressionsFile)
+	b.WriteString("            CACHE FILEPATH \"\")\n")
+	b.WriteString("    endif()\n")
+	b.WriteString("endif()\n\n")
+
+	// Refusing the combination in CMake as well as in the CLI, because a build
+	// tree configured with a sanitizer can be driven by a bare `ctest -T
+	// memcheck` that never goes through cppm.
+	fmt.Fprintf(b, "if(%s AND _cppm_valgrind)\n", safety.SanitizerCacheVar)
+	b.WriteString("    # Not a warning. A sanitizer-instrumented binary under valgrind produces\n")
+	b.WriteString("    # output that means nothing: the two intercept the same allocations and\n")
+	b.WriteString("    # each reports the other's bookkeeping as an error.\n")
+	b.WriteString("    set(MEMORYCHECK_COMMAND \"\" CACHE FILEPATH \"\" FORCE)\n")
+	fmt.Fprintf(b, "    message(STATUS \"cppm: valgrind disabled in this build tree because it is instrumented with ${%s}; \"\n", safety.SanitizerCacheVar)
+	b.WriteString("                   \"run valgrind against an uninstrumented preset ('cppm test --memcheck')\")\n")
+	b.WriteString("endif()\n\n")
+}
+
+// ValgrindSupp is the commented suppressions file `cppm init` scaffolds.
+//
+// Scaffolded empty-but-explained rather than left out, because the first
+// memcheck run on any real project produces output from the system libraries,
+// and a user who does not know suppressions exist concludes that the tool is
+// broken or that their code is.
+func ValgrindSupp() string {
+	return `# valgrind suppressions for this project.
+#
+# Valgrind reports errors inside system libraries that are not yours to fix: a
+# stock glibc, GTK, OpenSSL or CUDA all produce some. Entries here silence
+# those without hiding your own bugs.
+#
+# Do not write these by hand. Run:
+#
+#     cppm test --memcheck --gen-suppressions
+#
+# and valgrind prints a ready-made block for every error it reports. Paste the
+# ones that are clearly not yours below, and give each a name you will
+# recognise in six months.
+#
+# Format:
+#
+#     {
+#        a-name-you-choose
+#        Memcheck:Leak                 # or Cond, Value8, Addr4, Param, ...
+#        fun:malloc
+#        fun:some_library_function
+#        ...
+#     }
+#
+# 'obj:' matches a whole library and '...' matches any number of frames, so
+#
+#     {
+#        ld-so-init-noise
+#        Memcheck:Cond
+#        ...
+#        obj:*/ld-linux-x86-64.so.2
+#     }
+#
+# is the broad form. Prefer the narrowest entry that works: a suppression that
+# matches too much will one day hide a real bug of yours.
+#
+# This file is read automatically when it exists -- cppm wires it into
+# MEMORYCHECK_SUPPRESSIONS_FILE. Commit it.
+`
 }

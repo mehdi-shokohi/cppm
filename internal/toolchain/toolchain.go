@@ -215,3 +215,18 @@ func filepathBase(p string) string {
 // a present cmake means a broken installation rather than a missing optional
 // tool.
 func CTest() Tool { return Find("ctest") }
+
+// Valgrind locates valgrind.
+//
+// Optional, and effectively Linux-only: absent on Windows, and broken on Apple
+// Silicon. Callers are expected to recommend the sanitizers where it is
+// missing rather than only reporting that it is.
+func Valgrind() Tool { return Find("valgrind") }
+
+// Setarch locates setarch(1), used to run a ThreadSanitizer build with
+// address-space randomisation disabled.
+//
+// Part of util-linux, so present on practically every Linux system and absent
+// everywhere else, which is correct: the problem it solves is a Linux kernel
+// setting.
+func Setarch() Tool { return Find("setarch") }

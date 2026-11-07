@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/mehdi-shokohi/cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/safety"
 	"github.com/mehdi-shokohi/cppm/internal/toolchain"
 )
 
@@ -20,6 +21,14 @@ type testOpts struct {
 	list     bool
 	noBuild  bool
 	failFast bool
+	warnings string
+	sanitize string
+	// valgrind is the single tool resolved from the per-tool flags below.
+	valgrind string
+	genSupp  bool
+	// valgrindFlags holds one bool per tool, because the flags are spelled
+	// --memcheck and --helgrind rather than --valgrind=memcheck.
+	valgrindFlags map[string]*bool
 }
 
 func cmdTest() *Command {
@@ -34,6 +43,15 @@ func cmdTest() *Command {
 		fs.BoolVar(&o.list, "list", false, "list the tests without running them")
 		fs.BoolVar(&o.noBuild, "no-build", false, "do not build first; test whatever is in the build tree")
 		fs.BoolVar(&o.failFast, "fail-fast", false, "stop at the first failing test")
+		fs.StringVar(&o.warnings, "warnings", "", warningsFlagHelp)
+		fs.StringVar(&o.sanitize, "sanitize", "", sanitizeFlagHelp)
+		for _, name := range safety.ValgrindTools {
+			tool, _ := safety.FindValgrindTool(name)
+			fs.BoolVar(valgrindFlagTarget(o, name), name, false,
+				"run the tests under valgrind "+name+" -- "+tool.Summary)
+		}
+		fs.BoolVar(&o.genSupp, "gen-suppressions", false,
+			"with a valgrind tool, print a ready-made "+safety.SuppressionsFile+" entry for every error")
 		return fs, o
 	}
 	return &Command{
@@ -60,6 +78,28 @@ code that is no longer there, which is worse than no result at all. Pass
     cppm test --filter parser      # only tests whose name matches "parser"
     cppm test --verbose            # output from passing tests as well
     cppm test --list               # what would run
+    cppm test --warnings=error     # build the tests with -Werror as well
+
+Under a sanitizer -- recompiles into its own build tree, 5-15x slower:
+
+    cppm test --sanitize=asan+ubsan   # memory errors and undefined behaviour
+    cppm test --sanitize=tsan         # data races and lock-order inversions
+
+Under valgrind -- no recompilation, 20-100x slower, needs valgrind installed:
+
+    cppm test --memcheck      leaks, invalid reads/writes, uninitialised values
+    cppm test --helgrind      data races AND lock-order violations
+    cppm test --drd           lighter thread checker, better with many threads
+    cppm test --massif        heap profiler
+    cppm test --cachegrind    cache and branch-prediction profiler
+
+Which race checker? Use --sanitize=tsan routinely: it is far faster and has
+fewer false positives. Use --helgrind when you cannot recompile, or when you
+suspect a lock-ordering deadlock -- it is the thorough one for lock order.
+
+A sanitizer and valgrind cannot be combined. Both intercept the same
+allocations and each reports the other's bookkeeping as an error, so the
+output means nothing; cppm refuses rather than producing it.
 
 Getting a test suite in the first place:
 
@@ -83,6 +123,37 @@ Getting a test suite in the first place:
 			if strings.HasPrefix(o.filter, "-") {
 				return fmt.Errorf("--filter %q must not begin with '-'; it is a regular expression matched against test names", o.filter)
 			}
+			if err := checkWarningsFlag(o.warnings); err != nil {
+				return err
+			}
+			if err := checkSanitizeFlag(o.sanitize); err != nil {
+				return err
+			}
+			if err := o.resolveValgrind(fs); err != nil {
+				return err
+			}
+			if o.sanitize != "" && o.valgrind != "" {
+				return fmt.Errorf("--sanitize and --%s cannot be combined.\n"+
+					"a sanitizer-instrumented binary under valgrind produces output that means nothing:\n"+
+					"the two intercept the same allocations and each reports the other's bookkeeping as\n"+
+					"an error. run them as two passes -- 'cppm test --sanitize=%s' and 'cppm test --%s'",
+					o.valgrind, o.sanitize, o.valgrind)
+			}
+			if o.genSupp {
+				if o.valgrind == "" {
+					return fmt.Errorf("--gen-suppressions only applies to a valgrind run; add --memcheck")
+				}
+				// A suppression silences a reported error, and a profiler
+				// reports none -- there would be nothing to paste anywhere.
+				if tool, _ := safety.FindValgrindTool(o.valgrind); !tool.FindsErrors {
+					return fmt.Errorf("--gen-suppressions does not apply to --%s, which is a profiler and reports no errors to suppress.\n"+
+						"it is for --memcheck, --helgrind and --drd", o.valgrind)
+				}
+			}
+			if o.release && o.sanitize != "" {
+				return fmt.Errorf("--release and --sanitize are mutually exclusive: a sanitizer build has its own\n" +
+					"build tree and its own flags")
+			}
 			return runTest(o)
 		},
 	}
@@ -98,15 +169,26 @@ func runTest(o *testOpts) error {
 	if err != nil {
 		return err
 	}
-	preset := "debug"
-	if o.release {
-		preset = "release"
+	preset := presetFor(o.sanitize, o.release)
+
+	if o.sanitize != "" {
+		san, _ := safety.FindSanitizer(o.sanitize)
+		if err := checkInjectedSanitizers(p, san, preset); err != nil {
+			return err
+		}
+	}
+	var vg toolchain.Tool
+	if o.valgrind != "" {
+		vg, err = checkValgrindUsable(p, preset)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Configuring is not optional even for --no-build: ctest reads
 	// CTestTestfile.cmake out of the build tree, and that file only exists
 	// after a configure.
-	if err := configure(p, cmake, preset, false); err != nil {
+	if err := configure(p, cmake, preset, false, SyncOptions{Warnings: o.warnings}); err != nil {
 		return err
 	}
 	if !o.noBuild && !o.list {
@@ -128,6 +210,11 @@ func runTest(o *testOpts) error {
 	if o.failFast {
 		args = append(args, "--stop-on-failure")
 	}
+	var tool safety.ValgrindTool
+	if o.valgrind != "" {
+		tool, _ = safety.FindValgrindTool(o.valgrind)
+		args = append(args, valgrindArgs(p, preset, vg, tool, o.genSupp)...)
+	}
 	if o.list {
 		args = append(args, "-N")
 		return toolchain.Run(p.Root, ctest.Path, args...)
@@ -139,8 +226,54 @@ func runTest(o *testOpts) error {
 		return noTestsError(p, o.filter)
 	}
 
-	fmt.Printf("\ntesting (%s)\n", preset)
-	if err := toolchain.Run(p.Root, ctest.Path, args...); err != nil {
+	switch {
+	case o.valgrind != "":
+		// Said before the run, not after: 20-100x slower means a suite that
+		// takes a minute takes most of an hour, and a user who was not warned
+		// assumes it has hung.
+		fmt.Printf("\ntesting (%s) under valgrind %s -- expect 20-100x slower than normal\n", preset, tool.Name)
+	case o.sanitize != "":
+		fmt.Printf("\ntesting (%s) under %s\n", preset, o.sanitize)
+	default:
+		fmt.Printf("\ntesting (%s)\n", preset)
+	}
+
+	// ThreadSanitizer maps its shadow memory at fixed addresses and a
+	// high-entropy-ASLR kernel -- the default on current distributions -- can
+	// put the binary where that will not fit. Launching the whole ctest run
+	// with randomisation off is inherited by every test process.
+	argv := append([]string{ctest.Path}, args...)
+	if tsanNeedsFixedAddressSpace(o.sanitize) {
+		if prefix := aslrDisablingPrefix(); prefix != nil {
+			fmt.Println("  (address-space randomisation disabled for this run; ThreadSanitizer needs a fixed shadow mapping)")
+			argv = append(prefix, argv...)
+		} else {
+			fmt.Printf("  %s\n", tsanASLRHint)
+		}
+	}
+
+	// Stale results from an earlier run would make the "did anything actually
+	// get checked" test below pass on a run that checked nothing.
+	if o.valgrind != "" {
+		clearValgrindResults(p, preset)
+	}
+
+	runErr := toolchain.Run(p.Root, argv[0], argv[1:]...)
+
+	if o.valgrind != "" {
+		if !valgrindCheckedSomething(p, preset) {
+			return fmt.Errorf("ctest reported no memory-check results, so nothing was actually run under valgrind %s.\n"+
+				"this is a cppm bug rather than a problem with your project -- please report it,\n"+
+				"with the output above and the version from 'cppm --version'", tool.Name)
+		}
+		reportValgrind(p, preset, tool)
+	}
+	if runErr != nil {
+		if o.valgrind != "" {
+			// A memcheck failure is not a failing assertion, and saying "tests
+			// failed" sends the user looking in the wrong place.
+			return fmt.Errorf("valgrind %s reported errors, or a test failed; see the output above", tool.Name)
+		}
 		// ctest has already named every failing test and, thanks to
 		// outputOnFailure in the test preset, printed its output. Repeating its
 		// exit status on top of that tells the user nothing.

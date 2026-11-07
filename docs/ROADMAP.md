@@ -22,8 +22,8 @@ A tag is plain semver and names a release, not a roadmap item. `v0.2.3` is the r
 
 Earlier tags did encode the roadmap: `v0.2.2` meant "roadmap items through 0.2.2 are in", which left
 no room for a fixes-only release and forced a fourth component — `v0.2.2.1`, "`v0.2.2` plus fixes".
-That scheme is retired. Four-part tags are not used again, `v0.2.2.1` stays in the history, and the
-next tag is **`v0.2.3`**.
+That scheme is retired. Four-part tags are not used again and `v0.2.2.1` stays in the history. The
+0.2 line has since run to **`v0.2.5`**; the next tag, carrying 0.3.1, is **`v0.3.0`**.
 
 The consequence is that **`v0.2` is closed to new features**: the 0.2 line now takes fixes only, and
 the safety work that was numbered 0.2.3 through 0.2.8 moved to [v0.3](#v03--making-your-c-project-safer)
@@ -120,15 +120,17 @@ How it ended up working, and why:
 
 ---
 
-## v0.2.3 — Getting a project and its files in, with less typing — **done**
+## v0.2.3–v0.2.5 — Getting a project and its files in, with less typing — **done**
 
 Two gaps that every new user hit in the first ten minutes, neither of which is about dependencies.
+The three items shipped across three tags rather than one, which is the versioning change above
+working as intended: an item ships in whichever release it is ready for.
 
 | Item | Status |
 |---|---|
-| 0.2.3 `cppm install` | **done** — `v0.2.3` |
+| 0.2.3 `cppm install` | **done** — `v0.2.4` |
 | 0.2.4 `cppm sources` | **done** — `v0.2.3` |
-| 0.2.5 Git submodules | **done** — `v0.2.3` |
+| 0.2.5 Git submodules | **done** — `v0.2.5` |
 
 ### 0.2.3 `cppm install` — what to run after cloning — **done**
 
@@ -246,12 +248,16 @@ every item below now has something to run.
 
 | Item | Status |
 |---|---|
-| 0.3.1 Warnings and hardening | **next** |
-| 0.3.2 Debug standard library | planned |
-| 0.3.3 Sanitizer presets | planned |
-| 0.3.4 Valgrind, Helgrind and DRD | planned |
+| 0.3.1 Warnings and hardening | **done** |
+| 0.3.3 Sanitizer presets | **done** |
+| 0.3.4 Valgrind, Helgrind and DRD | **done** |
+| 0.3.2 Debug standard library | **next** |
 | 0.3.5 Static analysis | planned |
 | 0.3.6 CI stages | planned |
+
+Item numbers are the order the checks should be *adopted in*, not the order they are *built in* --
+see [Sequencing](#sequencing-and-what-to-do-next). 0.3.2 is behind 0.3.3 and 0.3.4 because the
+sanitizers and valgrind are what people are actually asking for.
 
 The checks stack, cheapest first — a project should adopt them in this order:
 
@@ -275,7 +281,7 @@ encodes — ASan and TSan are mutually exclusive, never run an instrumented bina
 runtime. A generic step runner would remove no CMake knowledge, which is this document's bar for
 inclusion.
 
-### 0.3.1 Warnings and hardening — the cheapest safety there is — **next**
+### 0.3.1 Warnings and hardening — the cheapest safety there is — **done**
 
 Worth doing before sanitizers, because it costs no runtime and catches a different, larger class of
 bug. Most C++ projects ship with warnings effectively off because nobody remembers the flags.
@@ -310,7 +316,40 @@ Gotchas to encode rather than let users hit:
   optimised configurations.
 - **`-D_GLIBCXX_DEBUG` is a separate, heavier thing** — see 0.3.2.
 
-### 0.3.2 Debug standard library
+**What shipped, and the two decisions that were not obvious beforehand.**
+
+The flags go on the project's own targets, with
+`target_compile_options(<target> PRIVATE ...)` from a `cmake_language(DEFER)` call — not with
+`add_compile_options()`. The note above says `SYSTEM` already suppresses a dependency's warnings,
+and it does: warnings raised by their *headers* inside your translation units. It does nothing about
+flags applied when the dependency's own sources are compiled, and `add_compile_options()` in the
+generated include reaches every directory added below it, which is every `FetchContent` dependency.
+So the naive version of this feature would have enforced `-Werror` on fmt and spdlog. There is an
+e2e test that builds a deliberately warning-ridden path dependency under `--warnings=error` and
+fails if the flags reach it.
+
+Half the hardening flags had to be probed rather than written down. `-fstack-clash-protection` is
+x86/s390x only and `-fcf-protection` is x86 only; GCC and Clang both *reject* them on aarch64
+rather than ignoring them, and Apple's linker rejects `-z` outright. Hardcoding the roadmap's list
+above would have meant cppm generating projects that do not compile on an M-series Mac or a
+Raspberry Pi. Each one now goes through `check_cxx_compiler_flag` / `check_linker_flag`, whose
+results are cached in `CMakeCache.txt`, so the cost is one configure rather than one build.
+
+Two smaller things worth not rediscovering: a generator expression containing a literal `;` is split
+in half by the unquoted `${...}` expansion that applies it, so `_FORTIFY_SOURCE`'s `-U` and `-D` are
+two separate genexes rather than one; and the optimised configurations are **named**
+(`Release`, `RelWithDebInfo`, `MinSizeRel`) rather than written as "not `Debug`", because a
+multi-config generator reports an empty configuration, which satisfies "not Debug" and would apply
+`_FORTIFY_SOURCE` to exactly the unoptimised build it does nothing in.
+
+**What 0.3.3 and 0.3.4 inherit.** `internal/safety` is the flag table, and `cppm.json`'s `"safety"`
+block is the place the rest of v0.3 is declared. The per-target mechanism is *not* reusable for the
+sanitizers, though, and that is the next item's central problem: ASan and TSan have to instrument
+the whole program, dependencies included, or TSan reports races it cannot see the synchronisation
+for. Sanitizers therefore belong in the presets and in `CMAKE_CXX_FLAGS`, where the flags
+deliberately *do* reach the dependencies — the opposite placement from this item, for a reason.
+
+### 0.3.2 Debug standard library — **next**
 
 Catches iterator invalidation, out-of-range access and container misuse that neither warnings nor
 ASan reliably find.
@@ -328,7 +367,7 @@ most projects never turn it on.
 flags, so the whole program is consistent by construction. This is a genuine advantage of the
 FetchContent model and should be documented as one.
 
-### 0.3.3 Sanitizer presets
+### 0.3.3 Sanitizer presets — **done**
 
 New configure presets, selected by `cppm build --sanitize=<name>`:
 
@@ -369,7 +408,68 @@ Constraints the tool must encode, not leave to be discovered:
 - Useful defaults: `ASAN_OPTIONS=abort_on_error=1:detect_stack_use_after_return=1`,
   `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`, `TSAN_OPTIONS=second_deadlock_stack=1`.
 
-### 0.3.4 Valgrind, Helgrind and DRD
+**What shipped, and where it departs from the sketch above.**
+
+The flags are **not** written into `cacheVariables`. The preset carries one
+private cache variable, `_cppm_sanitize`, and the generated include turns that
+into flags. The reason is the MSVC bullet: only CMake knows which compiler is in
+use, and a preset carrying `-fsanitize=thread` reaches MSVC as an unrecognised
+option rather than as the refusal that bullet asks for. It also keeps every
+compiler-family flag table in `internal/safety`, where the warning levels
+already live. The flags still go into `CMAKE_CXX_FLAGS` and the linker flags,
+still before the dependencies, so nothing about the reach changes.
+
+**ASan/TSan mutual exclusion is enforced by construction**, not by a check:
+there is no preset name meaning both, so the combination cannot be configured —
+only asked for, and refused with a sentence. `--sanitize=asan+tsan`,
+`--sanitize=msan` and `--sanitize=lsan` each get their own answer, because those
+are the three things people actually type.
+
+**The duckdb hazard is handled by scanning, not at configure time.** A
+dependency that appends to `CMAKE_CXX_FLAGS_DEBUG` does so in its own directory
+scope, which the parent cannot see, so there is nothing for the generated CMake
+to inspect. `internal/safety.ScanInjectedSanitizers` walks the dependency's
+CMake files instead — from the `_deps` tree if it exists, otherwise cppm's
+source cache — finds `-fsanitize=`, and walks *backwards* with nesting awareness
+to the enclosing `if()` to name the option guarding it. `cppm build
+--sanitize=tsan` then refuses before configuring and prints the `cppm.json` edit
+that fixes it. An option the user has already set OFF is not reported, and
+UBSan is not treated as a conflict because it composes with either.
+
+**A sanitizer preset sets no `CMAKE_BUILD_TYPE`,** which was not obvious. The
+sanitizer flags carry `-g -O1`, and a build type's own `-O0` or `-O2` comes
+later on the command line and wins. Leaving it unset also drops `-DNDEBUG`, so
+`assert()` survives, and makes the `_FORTIFY_SOURCE` genex from 0.3.1 evaluate
+to nothing — which matters more than it sounds: fortified libc calls hide the
+overflows ASan exists to catch.
+
+**MSVC's `/RTC1` clashes with `/fsanitize=address`.** It is in CMake's default
+MSVC Debug flags and MSVC rejects the pair outright, and because a
+multi-config generator picks Debug for these presets it is the default case on
+Windows rather than an edge one. The generated CMake strips `/RTC` from the
+per-configuration flags in the MSVC branch. **Unverified against a real MSVC:**
+there is no Windows CI, so this and the MSVC refusal path are covered only by
+tests against the generated text. Windows remains in
+[v0.5](#v05--platform-parity).
+
+**One gotcha the roadmap did not predict, and it makes TSan unusable without
+it.** ThreadSanitizer maps its shadow memory at fixed addresses, and a kernel
+with high-entropy ASLR — the default on current Ubuntu, Fedora and Arch — can
+place the binary where that mapping will not fit. TSan dies before `main()` with
+
+```
+FATAL: ThreadSanitizer: unexpected memory mapping 0x...
+```
+
+which names neither the cause nor the fix and reads like a broken toolchain.
+This was hit on the first real `--sanitize=tsan` run during development. `cppm
+test --sanitize=tsan` now launches the whole ctest run under `setarch -R`, which
+every test process inherits; where setarch is missing, it prints the
+`vm.mmap_rnd_bits` sysctl instead. A TSan preset that fails this way on a stock
+distribution is not a feature.
+
+
+### 0.3.4 Valgrind, Helgrind and DRD — **done**
 
 A different mechanism: no recompilation, the binary runs under emulation. Wired through CTest's
 built-in memcheck support rather than reinvented.
@@ -414,6 +514,62 @@ Constraints to encode:
 - **Valgrind is effectively Linux-only** — broken on Apple Silicon, absent on Windows. Elsewhere
   `doctor` should recommend ASan/TSan, which overlap heavily.
 - Memcheck is 10–50× slower, so it belongs in a nightly job rather than on every push.
+
+**What shipped.** All five tools, through `ctest -T memcheck` with
+`--overwrite MemoryCheckCommandOptions=...` per run, so the tool is selected at
+run time and the build tree keeps memcheck as its default for anyone driving
+ctest by hand. `cppm init` scaffolds a commented `valgrind.supp`, and
+`--gen-suppressions` is a flag rather than advice.
+
+Three things worth not rediscovering.
+
+**The `MEMORYCHECK_*` variables must be set before `include(CTest)`.** The CTest
+module reads them to write `DartConfiguration.tcl`, which is the only thing
+`ctest -T memcheck` looks at; setting them afterwards is inert. This is the same
+hazard as emitting a cache option after `FetchContent_Declare`, and it has the
+same symptom — a memcheck run with no valgrind in it.
+
+**`find_program` must not write into `MEMORYCHECK_COMMAND` directly.** When
+valgrind is absent that leaves the cache entry `NOTFOUND`, and the CTest module
+then runs its *own* `find_program` over the same variable — whose `NAMES` list
+includes `purify`, `drmemory` and NVIDIA's `compute-sanitizer`. This was
+observed during development: on a machine with the CUDA toolkit installed,
+`MEMORYCHECK_COMMAND` came out as `/usr/bin/compute-sanitizer` while cppm had
+already set `MEMORYCHECK_TYPE=Valgrind`, so `ctest -T memcheck` would have run
+the wrong tool with valgrind's options. cppm now searches under a private name,
+claims nothing unless valgrind itself was found, and pins the command per run
+with `--overwrite MemoryCheckCommand=`.
+
+**Profilers need different reporting.** CTest counts "defects" by parsing
+memcheck's output format, so a massif or cachegrind run is always reported as
+clean. cppm says where the output went and which tool reads it (`ms_print`,
+`cg_annotate`) rather than repeating a meaningless zero.
+
+**A fourth thing, found the moment a machine with valgrind actually ran this.**
+`ctest --preset <p> -T memcheck` does **not** run in the preset's binary
+directory. `-T memcheck` is a dashboard action and reads
+`DartConfiguration.tcl` out of the *current* directory, and cppm runs ctest from
+the project root so `--preset` can find `CMakePresets.json`. So ctest looked for
+`DartConfiguration.tcl` beside `cppm.json`, did not find it, printed
+`No tests were found!!!` -- and **exited 0**. cppm reported a clean memcheck
+pass having checked nothing at all, which is the worst outcome available to a
+tool whose job is finding bugs. `--test-dir <buildDir>` is passed alongside
+`--preset` now (ctest accepts both), and because the failure was silent rather
+than loud, cppm also verifies after every run that CTest wrote the per-test
+`MemoryChecker.*.log` and errors if it did not. Stale logs are cleared first, or
+yesterday's results would satisfy that check.
+
+This is the strongest argument in this document for e2e tests that use the real
+tool: every unit test passed, the generated CMake was correct, and the feature
+did nothing.
+
+Verified against valgrind 3.22 on Linux: memcheck detects a definite leak and
+fails the run, helgrind reports a lock-order inversion in a program that never
+deadlocks and passes an ordinary test run, DRD runs, massif and cachegrind
+produce their profiles and are reported as having no verdict, and
+`--gen-suppressions` emits a pasteable block. A sanitizer-instrumented tree
+refuses memcheck from a bare `ctest -T memcheck` as well as from cppm.
+
 
 ### 0.3.5 Static analysis
 
@@ -749,10 +905,36 @@ Within v0.2 the order was forced: **dev-dependencies (0.2.2) had to land with or
 (0.2.1)**, because a test command that links Catch2 into your release binary is wrong from the first
 release and becomes a breaking change to fix later. Both are done, and v0.2 is closed to features.
 
-**Next is 0.3.1, warnings and hardening.** It is the best value per hour of work: no runtime cost,
-no new concepts for the user, and it catches more real bugs than any single sanitizer. Sanitizers
-and valgrind are more impressive but find a narrower class of problem more slowly.
+**0.3.1, warnings and hardening, is done.** It was the best value per hour of work: no runtime cost,
+no new concepts for the user, and it catches more real bugs than any single sanitizer. It was also
+cheap to verify, which it had not been before — `cppm test` means a warning level can be asserted
+against a project that actually builds and runs, rather than only against the text of the generated
+CMake.
 
-0.3.1 is also now cheap to verify, which it was not before: `cppm test` means a warning level can
-be asserted against a project that actually builds and runs, rather than only against the text of
-the generated CMake.
+**0.3.3 and 0.3.4 are done**, out of item order and ahead of 0.3.2, because demand decided it:
+"how do I run my tests under ASan" and "how do I find this data race" are the questions being
+asked. Item numbers are an adoption order, not a build order.
+
+The decision that mattered there, recorded in [architecture.md](architecture.md) §5, is that
+**where a flag is applied is a correctness question**. Warnings go on the user's own targets and
+must never reach a dependency; sanitizers are the reverse. Getting it backwards produces, in order,
+a sanitizer run that finds nothing and a warning level that breaks on an upstream release.
+
+**Next is 0.3.2, the debug standard library.** It is the last of the three runtime checkers and the
+one cppm is best placed to offer, because `_GLIBCXX_DEBUG` changes the ABI: every translation unit
+linked together must agree, including every dependency. With system-installed libraries that is
+usually impossible, which is why most projects never turn it on — and why building dependencies
+from source in the same tree is not just a packaging choice.
+
+It should reuse what 0.3.3 built rather than the per-target mechanism: it is a whole-program flag
+like a sanitizer, so it belongs in the same place, and its preset should set no `CMAKE_BUILD_TYPE`
+for the same reasons. Two things to get right that have no equivalent in 0.3.3: it composes with
+ASan (unlike the ASan/TSan pair) so the preset set may need `asan+debugstl`, and a dependency built
+without it produces link-time errors rather than a clear message, so the same
+dependency-flag scanning that caught duckdb will want extending to cover a dependency that sets
+`_GLIBCXX_DEBUG` or its libc++ equivalent itself.
+
+After that, 0.3.5 (static analysis) and 0.3.6 (CI stages). 0.3.6 is the one that ties the release
+together: every check above is already both a local command and the thing a pipeline stage would
+run, and the `safety` block is where a `checks` declaration would go so that a check cannot pass
+locally and fail in CI because two files drifted apart.

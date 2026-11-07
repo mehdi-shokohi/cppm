@@ -12,6 +12,7 @@ import (
 	"github.com/mehdi-shokohi/cppm/internal/lockfile"
 	"github.com/mehdi-shokohi/cppm/internal/manifest"
 	"github.com/mehdi-shokohi/cppm/internal/project"
+	"github.com/mehdi-shokohi/cppm/internal/safety"
 )
 
 func cmdSync() *Command {
@@ -82,13 +83,42 @@ sync is idempotent: running it twice produces byte-identical output.`,
 	}
 }
 
+// SyncOptions carries per-invocation overrides that are deliberately not
+// written to cppm.json.
+type SyncOptions struct {
+	// Warnings overrides safety.warnings for this configure only, which is
+	// what `cppm build --warnings=strict` does. Empty means "use cppm.json".
+	//
+	// A one-off rather than a saved setting because trying a level out should
+	// not produce a commit, and because the committed level is the one CI will
+	// use -- the two should not drift because somebody passed a flag once.
+	Warnings string
+}
+
 // Sync regenerates the cppm-owned CMake files and reports what changed.
 //
 // Exported because `build` runs it first, so building a freshly cloned project
 // works without a separate sync step.
 func Sync(p *project.Project) ([]string, error) {
+	return SyncWith(p, SyncOptions{})
+}
+
+// SyncWith is Sync with per-invocation overrides.
+func SyncWith(p *project.Project, o SyncOptions) ([]string, error) {
 	if err := reconcile(p); err != nil {
 		return nil, err
+	}
+	if o.Warnings != "" {
+		// In memory only. Nothing on this path writes cppm.json, so the
+		// override lasts exactly as long as the configure it was asked for.
+		// The struct is copied rather than mutated in place so that a caller
+		// holding the manifest does not see the override either.
+		s := manifest.Safety{}
+		if p.Manifest.Safety != nil {
+			s = *p.Manifest.Safety
+		}
+		s.Warnings = o.Warnings
+		p.Manifest.Safety = &s
 	}
 	var changes []string
 
@@ -151,6 +181,14 @@ func describeManagedChange(before, after string, m *manifest.Manifest) string {
 	if before == "" {
 		return fmt.Sprintf("generated %s", cmakegen.GeneratedRelPath)
 	}
+	if oldLevel, newLevel := cmakeWarningLevel(before), cmakeWarningLevel(after); oldLevel != newLevel {
+		// The whole section is omitted when nothing is switched on, so an
+		// absent level in the new file means off, not unknown.
+		if newLevel == "" {
+			newLevel = safety.WarningsOff
+		}
+		return fmt.Sprintf("warnings %s -> %s", quoteOrNone(oldLevel), newLevel)
+	}
 	// A changed source list is the most likely reason for a regeneration in a
 	// project using "sourceGlobs", and "regenerated (C++20, 0 dependencies)"
 	// would say nothing about it.
@@ -170,6 +208,35 @@ func describePresetChange(m *manifest.Manifest) string {
 		parts = append(parts, "generator "+m.Toolchain.Generator)
 	}
 	return strings.Join(parts, " -- ")
+}
+
+// cmakeWarningLevel reads the warning level back out of the generated file's
+// own header comment, which is the only place it is recorded.
+//
+// Scraped rather than diffed against the manifest because the question being
+// answered is "what changed", and the manifest only knows the after.
+func cmakeWarningLevel(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
+		const prefix = `"warnings": "`
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(line, prefix)
+		if i := strings.Index(rest, `"`); i >= 0 {
+			return rest[:i]
+		}
+	}
+	return ""
+}
+
+// quoteOrNone renders the previous warning level, which is absent for a
+// project generated before the "safety" block existed.
+func quoteOrNone(level string) string {
+	if level == "" {
+		return "(unset)"
+	}
+	return level
 }
 
 // cmakeIntSetting extracts set(<NAME> <int>) from generated CMake, for change

@@ -51,6 +51,29 @@ These are not style preferences. Breaking one is a bug even if the tests pass.
 8. **Prefer declining to guessing.** A confidently wrong link target produces a build that
    configures, links, and is silently wrong. In discovery, `WRONG == 0` matters more than the hit
    rate.
+9. **Never put a warning or hardening flag at directory scope.** `add_compile_options()` in the
+   generated include reaches every directory added below it, which is every `FetchContent`
+   dependency -- so `-Werror` lands on fmt and spdlog, where a warning is not the user's bug and an
+   upstream release can stop their build. They go on the project's own targets, `PRIVATE`, through
+   the deferred `_cppm_apply_safety`. Sanitizer flags are the deliberate exception: they must
+   instrument the whole program, so they go in `CMAKE_CXX_FLAGS` and the linker flags *before* the
+   dependencies. Getting it backwards gives a sanitizer run that finds nothing, or a warning level
+   that an upstream release can break. See docs/architecture.md section 5.
+10. **A sanitizer preset carries a name, not flags, and no `CMAKE_BUILD_TYPE`.** The preset sets
+   `_cppm_sanitize`; the generated include chooses the flags, because only CMake knows whether the
+   compiler is MSVC (which has `/fsanitize=address` and nothing else). A build type's `-O0`/`-O2`
+   would override the `-O1` the sanitizer flags ask for, and would switch `_FORTIFY_SOURCE` on,
+   which hides the overflows ASan exists to find.
+11. **`MEMORYCHECK_*` goes before `include(CTest)`, and never through `find_program` directly.**
+   The CTest module reads those variables to write `DartConfiguration.tcl`; setting them later is
+   inert. And a `find_program` writing straight into `MEMORYCHECK_COMMAND` leaves it `NOTFOUND`
+   for the CTest module's own search to fill with NVIDIA's `compute-sanitizer`.
+12. **`ctest -T memcheck` needs `--test-dir`, and a valgrind run must prove it ran.** `-T memcheck`
+   is a dashboard action and reads `DartConfiguration.tcl` from the *current* directory, not the
+   preset's binary dir; without `--test-dir` it reports "No tests were found!!!" and **exits 0**,
+   so the run looks like a clean pass having checked nothing. Every safety feature needs an e2e
+   test that uses the real tool: this one had passing unit tests, correct generated CMake, and did
+   nothing.
 
 If a task seems to require breaking one of these, say so and stop rather than working around it.
 The constraint is usually the point.
@@ -79,6 +102,7 @@ The constraint is usually the point.
 | `internal/discover` | scan, resolve variables, veto, rank, confidence gate |
 | `internal/recipes` | embedded curated database + user overrides |
 | `internal/sources` | expands `sourceGlobs` patterns; no cppm imports, so `manifest` can use it |
+| `internal/safety` | warning, hardening and sanitizer flag tables; valgrind options; dependency-flag scanning. No cppm imports either |
 | `internal/cmakegen` | the CMakeLists template and the managed include |
 | `internal/toolchain` | locates and runs cmake/ctest/ninja/git/compiler |
 | `internal/e2e` | drives the real binary against real CMake |

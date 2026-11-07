@@ -3,6 +3,7 @@ package cli
 import (
 	"flag"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -65,3 +66,8 @@ func isBoolFlag(v flag.Value) bool {
 	b, ok := v.(interface{ IsBoolFlag() bool })
 	return ok && b.IsBoolFlag()
 }
+
+// isWindows and isDarwin let the valgrind diagnostics say the right thing about
+// a platform valgrind does not support, without each caller importing runtime.
+func isWindows() bool { return runtime.GOOS == "windows" }
+func isDarwin() bool  { return runtime.GOOS == "darwin" }

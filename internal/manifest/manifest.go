@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/mehdi-shokohi/cppm/internal/atomicfile"
+	"github.com/mehdi-shokohi/cppm/internal/safety"
 	"github.com/mehdi-shokohi/cppm/internal/sources"
 )
 
@@ -155,6 +156,39 @@ func CompanionC(cxx string) string {
 	return ""
 }
 
+// Safety is the "safety" block: how hard the compiler looks at your code.
+//
+// A pointer on Manifest, so a manifest written before this block existed stays
+// byte-identical until the user opts in. The effective values come from
+// WarningLevel and Harden, never from the fields directly.
+type Safety struct {
+	// Warnings is one of safety.WarningLevels. The flags behind each level are
+	// in internal/safety; the level is what gets committed, so that the same
+	// cppm.json means the same intent under a compiler cppm has never seen.
+	Warnings string `json:"warnings,omitempty"`
+
+	// Hardening turns on the release hardening flags. A pointer because an
+	// absent field means "default", which is on -- a plain bool could not tell
+	// that apart from a deliberate false.
+	Hardening *bool `json:"hardening,omitempty"`
+}
+
+// WarningLevel returns the effective warning level, resolving an absent block.
+func (m *Manifest) WarningLevel() string {
+	if m.Safety == nil || m.Safety.Warnings == "" {
+		return safety.DefaultWarnings
+	}
+	return m.Safety.Warnings
+}
+
+// Harden reports whether the hardening flags are emitted.
+func (m *Manifest) Harden() bool {
+	if m.Safety == nil || m.Safety.Hardening == nil {
+		return safety.DefaultHardening
+	}
+	return *m.Safety.Hardening
+}
+
 // Target is a build target cppm scaffolds. v1 generates exactly one.
 type Target struct {
 	Kind    string   `json:"kind"`
@@ -211,6 +245,7 @@ type Manifest struct {
 	CXX          CXX                   `json:"cxx"`
 	CMake        CMake                 `json:"cmake"`
 	Toolchain    Toolchain             `json:"toolchain,omitempty"`
+	Safety       *Safety               `json:"safety,omitempty"`
 	Targets      map[string]Target     `json:"targets,omitempty"`
 	Dependencies map[string]Dependency `json:"dependencies"`
 	Overrides    map[string]string     `json:"overrides,omitempty"`
@@ -246,6 +281,13 @@ func New(name string, std int) *Manifest {
 			Minimum:               DefaultCMakeMinimum,
 			ExportCompileCommands: boolPtr(true),
 			BuildTypes:            DefaultBuildTypes(),
+		},
+		// Written out at its default for the same reason the cmake block is:
+		// a setting nobody can see is a setting nobody changes, and "how do I
+		// turn the warnings up" should be answerable by reading cppm.json.
+		Safety: &Safety{
+			Warnings:  safety.DefaultWarnings,
+			Hardening: boolPtr(safety.DefaultHardening),
 		},
 		Targets: map[string]Target{
 			name: {
@@ -328,6 +370,10 @@ func (m *Manifest) Validate() error {
 		if !validTypes[bt] {
 			return fmt.Errorf("cmake.buildTypes.%s: %q is not a CMake build type (expected Debug, Release, RelWithDebInfo or MinSizeRel)", preset, bt)
 		}
+	}
+	if m.Safety != nil && m.Safety.Warnings != "" && !safety.ValidWarnings(m.Safety.Warnings) {
+		return fmt.Errorf("safety.warnings: unknown level %q (expected one of %v)",
+			m.Safety.Warnings, safety.WarningLevels)
 	}
 	for field, v := range map[string]string{
 		"toolchain.cxx":       m.Toolchain.CXX,

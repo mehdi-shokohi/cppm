@@ -118,7 +118,7 @@ func runInstall(o *installOpts) error {
 	}
 	// configure() syncs again, which is cheap and idempotent, and keeps the
 	// single code path that every command driving CMake goes through.
-	if err := configure(p, cmake, preset, false); err != nil {
+	if err := configure(p, cmake, preset, false, SyncOptions{}); err != nil {
 		return err
 	}
 
