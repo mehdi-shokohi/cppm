@@ -580,3 +580,79 @@ func TestManagedSourceBlockExplainsAMissingTarget(t *testing.T) {
 	}
 	t.Error("no FATAL_ERROR covers a target that sourceGlobs names but CMakeLists.txt does not define")
 }
+
+// The scaffold is where a user goes when they create their second .cpp, so it
+// has to answer "where do I add it" on its own. A source file that is never
+// compiled fails at link time with an undefined symbol, which names neither
+// CMake nor this list.
+func TestCMakeListsExplainsBothWaysToAddSources(t *testing.T) {
+	out := CMakeLists(manifest.New("MyApp", 20))
+	for _, want := range []string{
+		"cppm sources add",           // the wildcard route
+		`"src/**/*.cpp"`,             // and that ** spans directories
+		".cppm/generated/cppm.cmake", // where the expansion lands
+		"cppm sync",                  // and that it costs a sync
+		"#     target_include_directories(MyApp PRIVATE include src)", // headers
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the scaffold does not mention %q, so it does not explain how to add a file", want)
+		}
+	}
+
+	// The header path itself stays as it was: README documents that init
+	// writes 'include' and that adding 'src' is the user's edit. The comment
+	// teaches that edit, it does not make it.
+	if !strings.Contains(out, "\ntarget_include_directories(MyApp PRIVATE include)\n") {
+		t.Error("init must still generate 'PRIVATE include'; adding 'src' is the user's call, per README")
+	}
+}
+
+// Every added line is a comment. The guide is prose inside a file CMake parses,
+// and a stray uncommented line would be a configure error in every new project.
+func TestCMakeListsGuideIsAllComments(t *testing.T) {
+	out := CMakeLists(withTests())
+	in := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "# ---") {
+			in = !in
+			continue
+		}
+		if in && !strings.HasPrefix(line, "#") {
+			t.Fatalf("guide line is not commented, CMake will fail on it: %q", line)
+		}
+	}
+}
+
+// 'cppm sources add' resolves the target implicitly only while there is one
+// target, and --with-tests already makes two. An example that errors as typed
+// teaches the user that the tool is broken.
+func TestCMakeListsSourceExamplesWorkAsTyped(t *testing.T) {
+	solo := CMakeLists(manifest.New("MyApp", 20))
+	if strings.Contains(solo, "cppm sources add --target") {
+		t.Error("single-target scaffold shows --target, which is noise: the flag is optional there")
+	}
+
+	multi := CMakeLists(withTests())
+	for _, line := range strings.Split(multi, "\n") {
+		trimmed := strings.TrimLeft(strings.TrimPrefix(line, "#"), " ")
+		if !strings.HasPrefix(trimmed, "cppm sources add") && !strings.HasPrefix(trimmed, "cppm sources remove") {
+			continue
+		}
+		if !strings.Contains(trimmed, "--target") {
+			t.Errorf("this project has two targets, so %q fails with 'cppm sources: --target is required'", trimmed)
+		}
+	}
+}
+
+// Written once, against the first target. Repeating it per target is how a
+// scaffold becomes a wall of comments nobody reads, including the parts that
+// matter.
+func TestCMakeListsGuideIsNotRepeatedPerTarget(t *testing.T) {
+	out := CMakeLists(withTests())
+	if n := strings.Count(out, "how to add source files to them"); n != 1 {
+		t.Errorf("the sources guide appears %d times; it belongs once, above the first target", n)
+	}
+	if n := strings.Count(out, `Where #include "..." searches`); n != 1 {
+		t.Errorf("the headers guide appears %d times; it belongs once", n)
+	}
+}

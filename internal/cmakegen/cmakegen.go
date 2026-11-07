@@ -63,7 +63,15 @@ func CMakeLists(m *manifest.Manifest) string {
 	}
 	ordered = append(ordered, m.TestTargetNames()...)
 
-	for _, name := range ordered {
+	if len(ordered) > 0 {
+		call := "add_executable"
+		if m.Targets[ordered[0]].Kind == manifest.KindLibrary {
+			call = "add_library"
+		}
+		writeSourcesGuide(&b, ordered[0], call, len(ordered) > 1)
+	}
+
+	for i, name := range ordered {
 		t := m.Targets[name]
 		switch t.Kind {
 		case manifest.KindLibrary:
@@ -76,6 +84,26 @@ func CMakeLists(m *manifest.Manifest) string {
 		}
 		b.WriteString(")\n\n")
 
+		// The headers explanation is written once, against the first target.
+		// Repeating it per target is how a scaffold turns into a wall of
+		// comments nobody reads, including the parts that matter.
+		if i == 0 {
+			b.WriteString("# Where #include \"...\" searches, and the one job cppm cannot do for you:\n")
+			b.WriteString("# CMake has no separate \"add a header folder\" directive, this is it. So\n")
+			b.WriteString("# headers are never listed -- only the directories holding them, here.\n")
+			b.WriteString("#\n")
+			b.WriteString("# 'include' means include/myproj/net/socket.hpp is reached as\n")
+			b.WriteString("# #include \"myproj/net/socket.hpp\". That extra directory level is what\n")
+			b.WriteString("# keeps your headers from colliding with a dependency's.\n")
+			b.WriteString("#\n")
+			b.WriteString("# Append a folder to put it on the path too. A common one is 'src', for\n")
+			b.WriteString("# headers that sit beside their .cpp and are private to the build:\n")
+			fmt.Fprintf(&b, "#     target_include_directories(%s PRIVATE include src)\n", name)
+			b.WriteString("# which makes src/models/User.h reachable as #include \"models/User.h\",\n")
+			b.WriteString("# instead of a relative \"../../\" chain that breaks when a file moves.\n")
+			b.WriteString("#\n")
+			b.WriteString("# A library whose *consumers* need the headers says PUBLIC, not PRIVATE.\n")
+		}
 		fmt.Fprintf(&b, "target_include_directories(%s PRIVATE include)\n\n", name)
 
 		b.WriteString("# Links the dependencies from cppm.json. Replace this with your own\n")
@@ -104,6 +132,86 @@ func CMakeLists(m *manifest.Manifest) string {
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// writeSourcesGuide explains, in the scaffold itself, the two ways to add
+// source files to a target and which one costs what.
+//
+// It is written here rather than only in the docs because this is the file a
+// user opens when they create their second .cpp, and the failure it prevents is
+// a quiet one: a source file that is never compiled produces an undefined
+// symbol at link time, which says nothing about CMake or about this list.
+//
+// example is the target the snippets are written against, and call its
+// add_executable/add_library form, so a user can paste them without renaming
+// anything.
+func writeSourcesGuide(b *strings.Builder, example, call string, multiTarget bool) {
+	// --target is optional only while the project has one target, and a
+	// --with-tests scaffold already has two. An example that errors as typed
+	// teaches the wrong thing, so the flag is rendered in when it is needed.
+	tflag := ""
+	if multiTarget {
+		tflag = " --target " + example
+	}
+	commands := [][2]string{
+		{"cppm sources add" + tflag + " src/net", "that folder, and below"},
+		{"cppm sources add" + tflag + " \"src/**/*.cpp\"", "the whole tree"},
+		{"cppm sources add" + tflag + " \"src/codec/*.cpp\"", "that folder only"},
+		{"cppm sources", "what the patterns match now"},
+		{"cppm sources remove" + tflag + " src/net", "stop compiling them"},
+	}
+	width := 0
+	for _, c := range commands {
+		if len(c[0]) > width {
+			width = len(c[0])
+		}
+	}
+	var examples strings.Builder
+	for _, c := range commands {
+		fmt.Fprintf(&examples, "#        %-*s   %s\n", width, c[0], c[1])
+	}
+
+	fmt.Fprintf(b, `# ---------------------------------------------------------------------------
+# Your targets -- and how to add source files to them
+#
+# 1. By hand, one path per line in the %[2]s() list below.
+#
+#    Nothing to sync: the file is compiled the next time CMake configures, and
+#    'cppm build' configures. Blank lines and '#' comments are allowed inside
+#    the list, so group it the way src/ is laid out:
+#
+#        %[2]s(%[1]s
+#            src/main.cpp
+#
+#            # domain
+#            src/models/User.cpp
+#            src/services/UserService.cpp
+#
+#            # http
+#            src/controllers/UsersController.cpp
+#        )
+#
+#    An explicit list keeps "what does this target compile" answerable from the
+#    diff, which is why it is the default.
+#
+# 2. By folder or wildcard, when a tree grows faster than you want to edit:
+#
+%[3]s#
+#    Quote any pattern containing * so the shell does not expand it first.
+#    '*' and '?' match inside one path segment, '**' spans directories, and a
+#    bare folder means every C++ source beneath it -- the form to prefer, since
+#    a file added there later needs no new pattern.
+#
+#    The patterns live in cppm.json. 'cppm sync' expands them and writes the
+#    matched files into .cppm/generated/cppm.cmake, which attaches them to the
+#    target from there -- cppm does not edit this file, ever. The trade-off is
+#    the sync: a source file created since the last one is not compiled until
+#    you run 'cppm sync' ('cppm build' syncs first, so building covers it).
+#
+# Editing "sources" in cppm.json is NOT a third way. 'init' read that list to
+# write this one; changing it afterwards does nothing. This file is the build.
+# ---------------------------------------------------------------------------
+`, example, call, examples.String())
 }
 
 // soleLibrary returns the project's only non-test library target, or "" when
