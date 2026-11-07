@@ -347,6 +347,18 @@ and any directory containing a `CMakeCache.txt`.
 
 Files already in `sources` are skipped, since `CMakeLists.txt` names those itself.
 
+**Headers are not sources.** The directory form takes `.cpp`, `.cc`, `.cxx` and `.c++` only. What
+makes `#include "myapp/net/socket.hpp"` resolve is the include *path*, not a pattern — see
+[Headers](#headers) below, where `init` has already done it for `include/`. An explicit pattern
+does match headers:
+
+```bash
+cppm sources add "include/**/*.hpp"   # IDE project trees only; changes no #include
+```
+
+CMake marks a header `HEADER_FILE_ONLY` by extension, so nothing is compiled twice and nothing
+breaks — it only makes the files appear in IDE project trees. Skip it unless you want that.
+
 ### By hand in CMakeLists.txt
 
 Nothing stops you doing it yourself, and for a handful of files it is clearer. Note that editing
@@ -385,6 +397,11 @@ target_include_directories(MyApp PRIVATE include src)
 
 A library whose headers its *consumers* need must say `PUBLIC` rather than `PRIVATE`; `init` writes
 `PRIVATE` because the scaffold has no consumers yet.
+
+This line is the one thing `cppm sources` cannot do for you. CMake has no separate "add a header
+folder" directive — `target_include_directories()` *is* that directive, and it takes a list, so a
+new header root is one word appended to a line already in your file. It is a one-time edit per
+folder, not per file, which is why cppm leaves it alone.
 
 ### A subfolder with its own CMakeLists.txt
 
