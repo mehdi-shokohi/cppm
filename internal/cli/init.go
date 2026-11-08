@@ -24,6 +24,12 @@ type initOpts struct {
 	withTests bool
 	compiler  string
 	generator string
+
+	// noPrompt is the explicit form of "do not ask"; interactive is the
+	// decision itself, made once in Run because only it can see whether any
+	// flag was given.
+	noPrompt    bool
+	interactive bool
 }
 
 func cmdInit() *Command {
@@ -37,6 +43,7 @@ func cmdInit() *Command {
 		fs.BoolVar(&o.withTests, "with-tests", false, "also scaffold a tests/ directory and a first test")
 		fs.StringVar(&o.compiler, "compiler", "", "C++ compiler: clang++, g++, or a path (default: CMake's choice)")
 		fs.StringVar(&o.generator, "generator", "", "CMake generator (default: Ninja when installed)")
+		fs.BoolVar(&o.noPrompt, "non-interactive", false, "never ask; use the defaults")
 		return fs, o
 	}
 	return &Command{
@@ -67,6 +74,15 @@ any dependency exists. Add a real one when you want it:
 
     cppm add github:catchorg/Catch2@v3.7.1 --dev
 
+Run with no flags in a terminal, init asks for the name, the kind, tests, the
+standard and the compiler, and prints the flags that reproduce the answers.
+Enter takes the default shown in brackets, which is what a bare init always
+produced -- except that a library defaults to having tests, since a test target
+can link a library and cannot link an executable.
+
+Passing any flag -- or --non-interactive, or redirecting the output -- skips the
+questions, so scripts and CI are never asked anything.
+
 Existing files are never clobbered; they are reported as kept.`,
 		flagSet: func() *flag.FlagSet { fs, _ := build(); return fs },
 		Run: func(args []string) error {
@@ -82,6 +98,11 @@ Existing files are never clobbered; they are reported as kept.`,
 			if len(rest) == 1 {
 				dir = rest[0]
 			}
+			// A flag answers one of the questions, so one flag means the user
+			// is telling rather than asking. --non-interactive is redundant
+			// under that rule and kept anyway: it is the documented way to say
+			// so, and it matches 'add' and 'install'.
+			o.interactive = !o.noPrompt && fs.NFlag() == 0 && isTerminalSession()
 			return runInit(dir, o)
 		},
 	}
@@ -114,23 +135,43 @@ func runInit(dir string, o *initOpts) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", root, err)
-	}
-
+	// The manifest check and the prompt both precede MkdirAll, so that a
+	// refused init -- an existing manifest, or a declined prompt -- does not
+	// leave an empty directory behind. os.Stat on a path whose parent does not
+	// exist simply fails, which is the "no manifest here" answer.
 	manifestPath := filepath.Join(root, manifest.FileName)
 	if _, err := os.Stat(manifestPath); err == nil && !o.force {
 		return fmt.Errorf("%s already exists (use --force to overwrite)", manifest.FileName)
 	}
 
+	suggested, changed := sanitizeName(filepath.Base(root))
 	name := o.name
-	if name == "" {
-		var changed bool
-		name, changed = sanitizeName(filepath.Base(root))
+	switch {
+	case o.interactive:
+		// interactive is only set when no flag was given, so every field of o
+		// still holds its default and the prompt owns all of them.
+		q := initQuestions{
+			dirArg:        dir,
+			suggestedName: suggested,
+			nameChanged:   changed,
+			compilers:     detectCompilers(),
+		}
+		if !askInit(os.Stdin, os.Stdout, q, o) {
+			fmt.Println("\nnothing created.")
+			return nil
+		}
+		fmt.Println()
+		name = o.name
+	case name == "":
+		name = suggested
 		if changed {
 			fmt.Printf("  note: directory name %q is not a valid target name; using %q\n",
 				filepath.Base(root), name)
 		}
+	}
+
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", root, err)
 	}
 
 	m := manifest.New(name, o.std)

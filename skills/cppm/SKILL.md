@@ -75,7 +75,13 @@ the current directory; otherwise the directory is created. Existing files are ne
 | `--generator <s>` | CMake generator (default: Ninja when installed) |
 | `--lib` | scaffold a library instead of an executable |
 | `--with-tests` | also scaffold `tests/`, a first test and the `add_test()` wiring |
+| `--non-interactive` | never ask; use the defaults |
 | `--force` | overwrite an existing `cppm.json` |
+
+With **no flags at all**, in a terminal, `init` asks for the name, kind, tests, standard and
+compiler, then prints the flag line that reproduces the answers. Any flag, `--non-interactive`, or
+output that is not a terminal skips the questions — so the form to use in a script, a Dockerfile or
+an agent's own commands is the one with flags, which never prompts.
 
 ### cppm add &lt;spec&gt;
 

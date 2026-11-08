@@ -101,7 +101,7 @@ v1 is three things: start a project, download a dependency, wire it into CMake.
 
 ```
 cppm init [<dir>] [--std 20] [--name N] [--lib] [--with-tests] [--compiler clang++]
-          [--generator Ninja] [--force]
+          [--generator Ninja] [--non-interactive] [--force]
 cppm add <spec> [--target T] [--name N] [--dev] [--non-interactive] [--no-discover] [--force]
 cppm install [--no-configure] [--release] [--non-interactive] [--no-discover]
                                aliases: fetch, bootstrap
@@ -251,6 +251,37 @@ target "MyApp" depends on "Catch2", which is marked "dev": true in cppm.json.
 a dev dependency may only be linked into a test target. Either add "test": true to
 targets.MyApp, or remove "dev": true from dependencies.Catch2 to link it everywhere
 ```
+
+### Asked, not guessed
+
+`cppm init` with no flags, in a terminal, asks before it writes:
+
+```
+project name [MyApp]:
+kind [1]:                      1) executable   2) library
+scaffold tests [Y/n]:
+C++ standard [20]:
+compiler [1]:                  1) g++   2) clang++
+create it [Y/n]:
+```
+
+Enter takes the bracketed default throughout, which is what a bare `cppm init` always produced —
+with one exception: for a library, tests default to **on**. A test target can link a library, so
+that scaffold exercises the real code from the first commit; an executable cannot be linked into
+another target, so there the default stays off rather than handing you a test that can only check
+itself.
+
+The recap prints the flags that reproduce your answers, because the second project should not have
+to be asked:
+
+```
+the same project without the questions:
+    cppm init MyApp --lib --with-tests --std 20
+```
+
+The questions are skipped entirely when any flag is passed, when `--non-interactive` is given, or
+when the output is not a terminal — so a script or a CI job is never asked anything, and `cppm init`
+in a pipeline behaves exactly as it did before.
 
 ## Tests
 

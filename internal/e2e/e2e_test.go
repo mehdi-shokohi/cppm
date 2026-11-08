@@ -601,3 +601,37 @@ func TestProjectEnablesCWhenACompilerIsConfigured(t *testing.T) {
 		t.Errorf("expected C to be enabled alongside CXX:\n%s", cml)
 	}
 }
+
+// A bare `cppm init` prompts on a terminal, and must not prompt anywhere else.
+// Output here is captured through a pipe, as it is in any CI job, and a
+// question asked where nobody can answer it is a build that hangs until it is
+// killed -- or, worse, one that reads the next line of a script as an answer.
+func TestInitDoesNotPromptWhenOutputIsNotATerminal(t *testing.T) {
+	dir := t.TempDir()
+	out := mustRun(t, dir, "init", "Quiet")
+
+	for _, asked := range []string{"project name", "what is it?", "create it", "Enter takes the default"} {
+		if strings.Contains(out, asked) {
+			t.Errorf("init asked %q with no terminal attached:\n%s", asked, out)
+		}
+	}
+	// And the defaults still have to be the ones they always were.
+	manifest := readFile(t, filepath.Join(dir, "Quiet", "cppm.json"))
+	if strings.Contains(manifest, "\"test\": true") {
+		t.Error("a non-interactive init scaffolded a test target")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Quiet", "tests")); err == nil {
+		t.Error("a non-interactive init created tests/")
+	}
+}
+
+// --non-interactive is the documented way to ask for the defaults from a
+// terminal. It cannot be tested through a pty here, but it must at least be
+// accepted rather than rejected as an unknown flag.
+func TestInitAcceptsNonInteractive(t *testing.T) {
+	dir := t.TempDir()
+	mustRun(t, dir, "init", "Plain", "--non-interactive")
+	if _, err := os.Stat(filepath.Join(dir, "Plain", "cppm.json")); err != nil {
+		t.Errorf("--non-interactive did not create a project: %v", err)
+	}
+}
