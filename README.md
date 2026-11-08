@@ -41,6 +41,10 @@ A **project scaffolder, a dependency pinner, and a wrapper over CMake presets an
 cppm generates CMake and shells out to `cmake`, `ninja` and `git`. It is not a build system and it
 does not replace CMake.
 
+
+https://github.com/user-attachments/assets/dfe4c00c-6506-40ba-afcf-db7939a135a8
+
+
 ## What cppm is not
 
 **cppm does not claim to generate complete or final CMake.** The goal is to get you from nothing to
