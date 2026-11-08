@@ -40,6 +40,20 @@ Both installers verify the release checksum, fall back to building from source w
 binary matches your platform, and tell you if the install directory is not on your `PATH`. Then run
 `cppm doctor` to check your toolchain.
 
+## Why cppm exists
+
+Every other language answers *how do I start?* with one command — `cargo new`, `npm init`,
+`go mod init`. C++ answers it with a reading list, and that first hour is where a lot of people
+quietly stop. cppm is the short path: a project that builds, dependencies pinned to commits, the
+CMake wiring worked out for you, and the warning, hardening and sanitizer tooling that already
+ships with your toolchain switched on instead of waiting for you to know it exists.
+
+It is not a new build system and not a new registry, because neither of those is the part that
+was missing.
+
+The longer version — the gap, the safety argument in an era that asks about it, and what cppm
+deliberately refuses to do: **[docs/why-cppm.md](docs/why-cppm.md)**.
+
 ## What cppm is
 
 A **project scaffolder, a dependency pinner, and a wrapper over CMake presets and the build.**
