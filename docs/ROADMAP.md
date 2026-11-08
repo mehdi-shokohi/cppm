@@ -246,7 +246,8 @@ genuinely optional, and nothing here forecloses it.
 The headline feature set, and the one with the clearest payoff. Everything here is about the code
 **cppm builds for you**: catching undefined behaviour, memory errors and data races in your own C++,
 with the configuration already written. It is unblocked work: `cppm test` landed in `v0.2.2`, so
-every item below now has something to run.
+every item below has something to run — and `cppm run` (0.3.8) means it no longer has to be a test
+suite.
 
 | Item | Status |
 |---|---|
@@ -254,6 +255,7 @@ every item below now has something to run.
 | 0.3.3 Sanitizer presets | **done** |
 | 0.3.4 Valgrind, Helgrind and DRD | **done** |
 | 0.3.7 Ask before scaffolding | **done** — `v0.3.1` |
+| 0.3.8 `cppm run` — the checks without a test suite | **done** |
 | 0.3.2 Debug standard library | **next** |
 | 0.3.5 Static analysis | planned |
 | 0.3.6 CI stages | planned |
@@ -485,6 +487,9 @@ cppm test --massif       # heap profiler
 cppm test --cachegrind   # cache and branch-prediction profiling
 ```
 
+The same five flags reach `cppm run` (0.3.8), where valgrind is handed the binary directly instead
+of going through CTest.
+
 Generated into the managed include:
 
 ```cmake
@@ -708,6 +713,60 @@ Two things that were not obvious:
   cannot be linked into another target, so there the same scaffold is a test that can only check
   itself. Offered, not defaulted — the same instinct as declining to guess a link target.
 
+### 0.3.8 `cppm run` — the checks, without a test suite — **done**
+
+Unplanned, and it came out of a question worth recording: *do the sanitizers and valgrind need a
+`_test` file?* They do not, and never did. A sanitizer is compile-time instrumentation of every
+line the compiler sees, `main()` included; valgrind runs any binary. What needed a test suite was
+cppm's **runner** — `cppm test` was the only way to execute anything, and it goes through CTest,
+which only sees `add_test()` targets. So the honest first answer to "my program leaks" on a new
+project was "write a test suite", which is precisely when nobody has one. The limitation was in the
+command surface, not in the tools.
+
+```sh
+cppm run                           # build the debug preset and run it
+cppm run -- --config a.toml -v     # everything after -- is the program's
+cppm run --sanitize=asan+ubsan     # the real program, no suite involved
+cppm run --memcheck                # and valgrind likewise
+cppm run --target tools_cli        # when the project has several executables
+```
+
+Scope note, since this is a *maker* and not a task runner: `run` builds and launches the project's
+own executable and nothing else. It is not a place to define named scripts.
+
+Five things that were not obvious:
+
+- **A sanitizer's runtime options live in the test preset's `environment`, and nothing applies them
+  to a binary launched directly.** `ASAN_OPTIONS=abort_on_error=1` and the rest are in
+  `CMakePresets.json` for CTest to set; run them by hand and the sanitizer falls back to its own
+  defaults, which **report the error and exit 0**. That is the same silent-pass shape as the
+  `ctest -T memcheck` bug in 0.3.4, reached by a different route, and it is the reason `run` is not
+  a three-line wrapper over `exec`. A value the user exported is appended *after* cppm's, because
+  these lists are read left to right with the last setting winning.
+- **A sanitizer finding arrives as a signal, not an exit code.** `abort_on_error=1` means SIGABRT,
+  and Go's `ExitCode()` returns `-1` for a signalled process — so a runner that read only the exit
+  code would see `-1` for the single most important outcome and have nothing to say about it.
+  `toolchain.ExitStatus` carries the signal name separately, and the message says the abort is the
+  sanitizer working rather than the program crashing.
+- **The direct valgrind path is much simpler than the CTest one, and must stay separate.** No
+  dashboard action means no `DartConfiguration.tcl`, no `--test-dir`, no `--overwrite`, and no need
+  to check afterwards that anything was examined: valgrind's own exit status is the result. Anyone
+  tempted to unify the two paths would reintroduce the 0.3.4 hazard, which is why both have their
+  own end-to-end tests.
+- **The exit status has to be passed through.** Collapsing every outcome to 1 would make `run`
+  useless in a script, so a program's own non-zero exit becomes cppm's and carries no message —
+  cppm has nothing to add to it. The cases that *do* get a message are the ones where the status
+  needs interpreting: a signal, a sanitizer abort, a valgrind run whose status is genuinely
+  ambiguous between "found errors" and "the program failed".
+- **Which executable to run is a declining question, not a guessing one.** One non-test executable
+  is unambiguous; two are not, and a test target is never chosen implicitly, for the same reason
+  cppm never infers that a target called `foo_tests` is a test. Under valgrind a wrong choice wastes
+  a 20-100x run and teaches the user to stop reading what was picked.
+
+One knock-on: `cppm test --memcheck` in a project with no tests used to be able to say only "write
+some tests". It now also names `cppm run --memcheck`, because that is the answer to what was
+actually asked.
+
 ## v0.4 — Correctness and reproducibility
 
 ### 0.4.1 Transitive dependency pinning
@@ -819,7 +878,11 @@ Releases that ship only fixes. Under plain semver these are ordinary patch relea
 [Versioning](#versioning) — and they never move an item's status in the tables above. `v0.2.2.1`
 predates that change and is the last four-part tag.
 
-### `v0.3.3`
+### Version reporting
+
+Unversioned on purpose: these fixes ship in whichever release carries them, and the release they
+went into also carries a feature (item 0.3.8), so it is not a fixes-only release and does not
+belong to this section's numbering.
 
 Found by installing `v0.3.1` on a machine that had no release asset yet, and reading what it called
 itself.
@@ -836,7 +899,7 @@ itself.
   release-looking number and nobody could tell.
 
 `v0.3.2` carries none of this: it was tagged on `v0.3.1`'s commit and ships identical code, so a
-source install of it still reports `0.3.1-dev`. The fix lands in `v0.3.3`.
+source install of it still reports `0.3.1-dev`. The fix lands in the next release after it.
 
 - **Both installers ignored `--version` when building from source.** The clone was `--depth 1` of
   the default branch whatever version was asked for, so `install.sh --version v0.2.5 --from-source`
@@ -968,6 +1031,12 @@ The decision that mattered there, recorded in [architecture.md](architecture.md)
 **where a flag is applied is a correctness question**. Warnings go on the user's own targets and
 must never reach a dependency; sanitizers are the reverse. Getting it backwards produces, in order,
 a sanitizer run that finds nothing and a warning level that breaks on an upstream release.
+
+**0.3.8, `cppm run`, is done and was not planned.** It came from a user question — do the
+sanitizers and valgrind require a test file? — whose answer turned out to be that cppm's command
+surface, not the tools, was imposing that. Worth noting as a pattern: three releases of safety work
+had gone into making the checks correct, and none into asking whether they were reachable on day
+one of a project. A check nobody can launch yet is indistinguishable from one that does not exist.
 
 **Next is 0.3.2, the debug standard library.** It is the last of the three runtime checkers and the
 one cppm is best placed to offer, because `_GLIBCXX_DEBUG` changes the ABI: every translation unit

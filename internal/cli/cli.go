@@ -52,6 +52,7 @@ func init() {
 	register(cmdSync())
 	register(cmdSources())
 	register(cmdBuild())
+	register(cmdRun())
 	register(cmdTest())
 	register(cmdList())
 	register(cmdInfo())
@@ -126,16 +127,42 @@ func Main(args []string) int {
 		return 2
 	}
 
-	switch err := c.Run(args[1:]); {
+	err := c.Run(args[1:])
+	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, flag.ErrHelp):
 		commandHelp(os.Stdout, c)
 		return 0
-	default:
-		fmt.Fprintf(os.Stderr, "cppm %s: %v\n", c.Name, err)
-		return 1
 	}
+	var ese *exitStatusError
+	if errors.As(err, &ese) {
+		if ese.msg != "" {
+			fmt.Fprintf(os.Stderr, "cppm %s: %v\n", c.Name, err)
+		}
+		return ese.code
+	}
+	fmt.Fprintf(os.Stderr, "cppm %s: %v\n", c.Name, err)
+	return 1
+}
+
+// exitStatusError carries a child process's exit status out to cppm's own.
+//
+// `cppm run` has to pass the program's status through: a script that switches
+// on an exit code gets the same answer it would have got running the binary
+// directly, instead of 1 for every outcome. An empty msg means the program has
+// already said everything there is to say and cppm adds nothing -- its own
+// "cppm run: ..." line would be noise on top of the program's output.
+type exitStatusError struct {
+	code int
+	msg  string
+}
+
+func (e *exitStatusError) Error() string {
+	if e.msg == "" {
+		return fmt.Sprintf("exited with status %d", e.code)
+	}
+	return e.msg
 }
 
 func usage(w io.Writer) {

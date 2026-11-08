@@ -296,6 +296,13 @@ Two more things in that section are load-bearing in a way the code cannot show:
   variable, whose `NAMES` list includes NVIDIA's `compute-sanitizer`. On a machine with the CUDA
   toolkit that produces `MEMORYCHECK_COMMAND=compute-sanitizer` beside
   `MEMORYCHECK_TYPE=Valgrind`, and `ctest -T memcheck` runs the wrong tool with valgrind's options.
+- **A sanitizer's runtime options live in the test preset, so they do not exist for a binary cppm
+  launches itself.** `CMakePresets.json` carries `ASAN_OPTIONS=abort_on_error=1` and the rest in the
+  *test* preset's `environment`, which CTest applies and nothing else does. A sanitizer left on its
+  defaults reports its finding and **exits 0** — the same silent-pass shape as the memcheck bug
+  below. `cppm run` therefore re-applies them itself, and that is the only reason it is not a
+  three-line wrapper over `exec`. A value the user has exported is appended *after* cppm's, since
+  the sanitizers read these colon-separated lists left to right with the last setting winning.
 - **`ctest --preset <p> -T memcheck` does not run in the preset's binary directory.** `-T memcheck`
   is a dashboard action: it reads `DartConfiguration.tcl` from the current directory, and cppm runs
   ctest from the project root so `--preset` can find `CMakePresets.json`. Without `--test-dir`,
@@ -334,7 +341,9 @@ internal/
 ├── cmakegen/          CMakeLists template, presets, the managed include
 ├── safety/            warning, hardening and sanitizer flag tables, by compiler
 │                     family; valgrind tool options; dependency-flag scanning
-├── toolchain/         locates cmake/ninja/git/compiler; runs them
+├── toolchain/         locates cmake/ninja/git/compiler; runs them, and reports how a
+│                     program cppm launched ended (exit status, or the signal that
+│                     killed it -- a sanitizer finding arrives as SIGABRT)
 ├── atomicfile/        write-temp-and-rename
 └── e2e/               drives the real binary against real CMake
 ```

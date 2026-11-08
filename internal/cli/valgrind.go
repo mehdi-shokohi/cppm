@@ -12,27 +12,51 @@ import (
 	"github.com/mehdi-shokohi/cppm/internal/toolchain"
 )
 
-// valgrindFlagTarget returns the bool each --<tool> flag writes into.
+// valgrindChoice is the valgrind flag surface shared by `test` and `run`.
+//
+// Both commands offer the same five tools with the same meanings, so they share
+// one definition: a second copy would be free to drift, and the flag that keeps
+// a valgrind run honest (--error-exitcode=1) is exactly the kind of thing that
+// gets left out of a copy.
+type valgrindChoice struct {
+	// valgrind is the single tool resolved from the per-tool flags.
+	valgrind string
+	genSupp  bool
+	// valgrindFlags holds one bool per tool, because the flags are spelled
+	// --memcheck and --helgrind rather than --valgrind=memcheck.
+	valgrindFlags map[string]*bool
+}
+
+// registerValgrindFlags declares one bool flag per tool, plus
+// --gen-suppressions.
 //
 // One bool per tool rather than a single --valgrind=<tool> because the roadmap
 // spells them as `cppm test --helgrind`, and because a tool name is not a value
 // anybody wants to quote. resolveValgrind folds them back into one choice.
-func valgrindFlagTarget(o *testOpts, name string) *bool {
+//
+// verb is the start of the help line ("run the tests under valgrind "), since
+// that is the one part the two commands genuinely disagree about.
+func (o *valgrindChoice) registerValgrindFlags(fs *flag.FlagSet, verb string) {
 	if o.valgrindFlags == nil {
 		o.valgrindFlags = map[string]*bool{}
 	}
-	b := new(bool)
-	o.valgrindFlags[name] = b
-	return b
+	for _, name := range safety.ValgrindTools {
+		tool, _ := safety.FindValgrindTool(name)
+		b := new(bool)
+		o.valgrindFlags[name] = b
+		fs.BoolVar(b, name, false, verb+name+" -- "+tool.Summary)
+	}
+	fs.BoolVar(&o.genSupp, "gen-suppressions", false,
+		"with a valgrind tool, print a ready-made "+safety.SuppressionsFile+" entry for every error")
 }
 
 // resolveValgrind collapses the per-tool flags into one choice and rejects two
 // at once.
 //
 // Two tools in one run cannot be honoured: valgrind takes a single --tool, and
-// running the suite twice under cppm's own control would report two sets of
+// running the program twice under cppm's own control would report two sets of
 // results as one. Refusing is the only honest option.
-func (o *testOpts) resolveValgrind(fs *flag.FlagSet) error {
+func (o *valgrindChoice) resolveValgrind() error {
 	var chosen []string
 	for _, name := range safety.ValgrindTools {
 		if b, ok := o.valgrindFlags[name]; ok && *b {
@@ -49,6 +73,31 @@ func (o *testOpts) resolveValgrind(fs *flag.FlagSet) error {
 		return fmt.Errorf("--%s cannot be combined: valgrind runs one tool at a time.\n"+
 			"run them as separate passes", strings.Join(chosen, " and --"))
 	}
+}
+
+// checkValgrindFlags rejects the combinations that cannot produce a meaningful
+// result, naming cmd so the suggested commands are ones the user can retype.
+func (o *valgrindChoice) checkValgrindFlags(cmd, sanitize string) error {
+	if sanitize != "" && o.valgrind != "" {
+		return fmt.Errorf("--sanitize and --%s cannot be combined.\n"+
+			"a sanitizer-instrumented binary under valgrind produces output that means nothing:\n"+
+			"the two intercept the same allocations and each reports the other's bookkeeping as\n"+
+			"an error. run them as two passes -- 'cppm %s --sanitize=%s' and 'cppm %s --%s'",
+			o.valgrind, cmd, sanitize, cmd, o.valgrind)
+	}
+	if !o.genSupp {
+		return nil
+	}
+	if o.valgrind == "" {
+		return fmt.Errorf("--gen-suppressions only applies to a valgrind run; add --memcheck")
+	}
+	// A suppression silences a reported error, and a profiler reports none --
+	// there would be nothing to paste anywhere.
+	if tool, _ := safety.FindValgrindTool(o.valgrind); !tool.FindsErrors {
+		return fmt.Errorf("--gen-suppressions does not apply to --%s, which is a profiler and reports no errors to suppress.\n"+
+			"it is for --memcheck, --helgrind and --drd", o.valgrind)
+	}
+	return nil
 }
 
 // checkValgrindUsable refuses a valgrind run that cannot produce a meaningful

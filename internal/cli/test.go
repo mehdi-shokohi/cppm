@@ -23,12 +23,9 @@ type testOpts struct {
 	failFast bool
 	warnings string
 	sanitize string
-	// valgrind is the single tool resolved from the per-tool flags below.
-	valgrind string
-	genSupp  bool
-	// valgrindFlags holds one bool per tool, because the flags are spelled
-	// --memcheck and --helgrind rather than --valgrind=memcheck.
-	valgrindFlags map[string]*bool
+	// Embedded rather than repeated so that test and run cannot end up
+	// offering the same valgrind flags with different behaviour.
+	valgrindChoice
 }
 
 func cmdTest() *Command {
@@ -45,13 +42,7 @@ func cmdTest() *Command {
 		fs.BoolVar(&o.failFast, "fail-fast", false, "stop at the first failing test")
 		fs.StringVar(&o.warnings, "warnings", "", warningsFlagHelp)
 		fs.StringVar(&o.sanitize, "sanitize", "", sanitizeFlagHelp)
-		for _, name := range safety.ValgrindTools {
-			tool, _ := safety.FindValgrindTool(name)
-			fs.BoolVar(valgrindFlagTarget(o, name), name, false,
-				"run the tests under valgrind "+name+" -- "+tool.Summary)
-		}
-		fs.BoolVar(&o.genSupp, "gen-suppressions", false,
-			"with a valgrind tool, print a ready-made "+safety.SuppressionsFile+" entry for every error")
+		o.registerValgrindFlags(fs, "run the tests under valgrind ")
 		return fs, o
 	}
 	return &Command{
@@ -129,26 +120,11 @@ Getting a test suite in the first place:
 			if err := checkSanitizeFlag(o.sanitize); err != nil {
 				return err
 			}
-			if err := o.resolveValgrind(fs); err != nil {
+			if err := o.resolveValgrind(); err != nil {
 				return err
 			}
-			if o.sanitize != "" && o.valgrind != "" {
-				return fmt.Errorf("--sanitize and --%s cannot be combined.\n"+
-					"a sanitizer-instrumented binary under valgrind produces output that means nothing:\n"+
-					"the two intercept the same allocations and each reports the other's bookkeeping as\n"+
-					"an error. run them as two passes -- 'cppm test --sanitize=%s' and 'cppm test --%s'",
-					o.valgrind, o.sanitize, o.valgrind)
-			}
-			if o.genSupp {
-				if o.valgrind == "" {
-					return fmt.Errorf("--gen-suppressions only applies to a valgrind run; add --memcheck")
-				}
-				// A suppression silences a reported error, and a profiler
-				// reports none -- there would be nothing to paste anywhere.
-				if tool, _ := safety.FindValgrindTool(o.valgrind); !tool.FindsErrors {
-					return fmt.Errorf("--gen-suppressions does not apply to --%s, which is a profiler and reports no errors to suppress.\n"+
-						"it is for --memcheck, --helgrind and --drd", o.valgrind)
-				}
+			if err := o.checkValgrindFlags("test", o.sanitize); err != nil {
+				return err
 			}
 			if o.release && o.sanitize != "" {
 				return fmt.Errorf("--release and --sanitize are mutually exclusive: a sanitizer build has its own\n" +
@@ -223,7 +199,7 @@ func runTest(o *testOpts) error {
 	// ctest exits 8 with "No tests were found" when a project has none, which
 	// reads as a build failure. Say what to do instead.
 	if n, known := countTests(p, ctest, preset, o.filter); known && n == 0 {
-		return noTestsError(p, o.filter)
+		return noTestsError(p, o)
 	}
 
 	switch {
@@ -311,9 +287,9 @@ func countTests(p *project.Project, ctest toolchain.Tool, preset, filter string)
 
 // noTestsError distinguishes "this project has no tests at all" from "your
 // filter matched none of them", because the remedy is completely different.
-func noTestsError(p *project.Project, filter string) error {
-	if filter != "" {
-		return fmt.Errorf("no test matches --filter %q; run 'cppm test --list' to see the names", filter)
+func noTestsError(p *project.Project, o *testOpts) error {
+	if o.filter != "" {
+		return fmt.Errorf("no test matches --filter %q; run 'cppm test --list' to see the names", o.filter)
 	}
 	if tests := p.Manifest.TestTargetNames(); len(tests) > 0 {
 		return fmt.Errorf("cppm.json declares the test target(s) %s, but the build tree has no registered test.\n"+
@@ -321,10 +297,31 @@ func noTestsError(p *project.Project, filter string) error {
 			"    add_test(NAME %s COMMAND %s)",
 			strings.Join(tests, ", "), tests[0], tests[0])
 	}
-	return fmt.Errorf("this project has no tests.\n" +
+	msg := "this project has no tests.\n" +
 		"scaffold one in a new project with 'cppm init --with-tests', or add to CMakeLists.txt:\n" +
 		"    add_executable(my_tests tests/my_test.cpp)\n" +
 		"    add_test(NAME my_tests COMMAND my_tests)\n" +
 		"and mark it in cppm.json so dev dependencies reach it:\n" +
-		"    \"targets\": { \"my_tests\": { \"kind\": \"executable\", \"sources\": [\"tests/my_test.cpp\"], \"test\": true } }")
+		"    \"targets\": { \"my_tests\": { \"kind\": \"executable\", \"sources\": [\"tests/my_test.cpp\"], \"test\": true } }"
+	// Somebody reaching for a sanitizer or valgrind wants to find a bug, not
+	// to write a test suite first. The instrumentation covers main() just as
+	// well as it covers a test, so point at the command that needs no suite --
+	// the lack of one is a limit of the runner, never of the tool.
+	if alt := runAlternative(o); alt != "" {
+		msg += "\n\nto check the program itself instead, with no test suite:\n    " + alt
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+// runAlternative renders the `cppm run` command equivalent to the test command
+// the user typed, or "" when they asked for a plain test run.
+func runAlternative(o *testOpts) string {
+	switch {
+	case o.valgrind != "":
+		return "cppm run --" + o.valgrind
+	case o.sanitize != "":
+		return "cppm run --sanitize=" + o.sanitize
+	default:
+		return ""
+	}
 }

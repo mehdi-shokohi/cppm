@@ -111,6 +111,13 @@ that fail silently and leave you believing you are covered:
   and no build type; the generated CMake picks the flags, because only CMake knows whether the
   compiler is MSVC.
 
+- **A sanitizer's runtime options are separate from its compile flags, and without them it does
+  not fail.** `-fsanitize=undefined` on its own prints the overflow it found and carries on to
+  exit 0: a green stage with the undefined behaviour still in it. The options that halt on the
+  first error live in the environment, not the build, so they have to be set wherever the binary is
+  launched from — a detail that is easy to get right once in CI and then lose the moment anybody
+  runs the binary by hand.
+
 - **`ctest -T memcheck` can pass without running anything.** It is a dashboard action and reads its
   configuration from the *current* directory, not the preset's binary directory. Pointed at the
   wrong one it prints `No tests were found!!!` and **exits 0** — a green stage that checked nothing.
@@ -124,10 +131,21 @@ So a new cppm project has warnings and release hardening on, and the rest is one
 
 ```bash
 cppm build                         # -Wall -Wextra on your targets, hardening in release
-cppm test --sanitize=asan+ubsan    # own build tree, own preset, correct -O level
+cppm run  --sanitize=asan+ubsan    # the real program, no test suite required
+cppm run  --memcheck               # valgrind on the real program, with its real arguments
+cppm test --sanitize=asan+ubsan    # the suite: own build tree, own preset, correct -O level
 cppm test --sanitize=tsan          # data races, lock-order inversions
 cppm test --memcheck               # valgrind, and it proves it ran
 ```
+
+The `run` half matters more than it looks. A sanitizer is compile-time instrumentation of every
+line the compiler sees, `main()` included, and valgrind runs any binary — neither ever needed a
+test suite. What they needed was a way to be launched, and in most tooling the only way offered is
+through the test runner. So the first honest answer to "my program leaks" becomes "write a test
+suite first", on day one of a project, which is when nobody does. `cppm run` is the same
+instrumentation with the suite taken out of the path. Use `run` to find the bug and `test` to keep
+it from coming back: a run only inspects the code paths you actually execute and cannot be repeated
+in CI, so the two are complements, not alternatives.
 
 Each hardening flag is probed with `check_cxx_compiler_flag` before use, because half of them are a
 hard error off x86: `-fstack-clash-protection` is x86/s390x only, `-fcf-protection` is x86 only, and
@@ -145,8 +163,8 @@ Overclaiming on safety is how a tool like this loses its credibility, so to be p
 **cppm does not make C++ memory safe.** No borrow checker, no lifetime analysis, no ownership
 model. A determined use-after-free will still reach your program.
 
-What it does is move a class of bug from *found by a user* to *found by the first test run*, on a
-default project, without reading a flags manual first. If you already run ASan in CI at the right
+What it does is move a class of bug from *found by a user* to *found by the first run*, on a
+default project, without reading a flags manual first and without having written a test suite yet. If you already run ASan in CI at the right
 `-O` level with hardened release builds, cppm has little to teach you — and the reason most projects
 do not is almost never that someone weighed it and decided against.
 

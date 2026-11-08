@@ -230,3 +230,84 @@ func Valgrind() Tool { return Find("valgrind") }
 // everywhere else, which is correct: the problem it solves is a Linux kernel
 // setting.
 func Setarch() Tool { return Find("setarch") }
+
+// ExitStatus is how a program cppm launched came to an end.
+//
+// Separate from an error because a non-zero exit is the normal, expected
+// result for `cppm run`: the user's program decides its own status, and cppm's
+// job is to report it faithfully rather than to turn every one of them into
+// "cppm failed".
+type ExitStatus struct {
+	// Code is the exit status, or -1 when a signal ended the process.
+	Code int
+	// Signal names the signal that killed the process as a bare noun --
+	// "aborted", "segmentation fault" -- so it reads correctly inside a
+	// sentence. Empty on a normal exit.
+	//
+	// This is not a detail that can be dropped: a sanitizer configured with
+	// abort_on_error=1 ends the program with SIGABRT rather than an exit
+	// status, so a runner that only looked at Code would read the single most
+	// important outcome as -1 and have nothing to say about it.
+	Signal string
+}
+
+// OK reports whether the program ran to completion successfully.
+func (s ExitStatus) OK() bool { return s.Code == 0 && s.Signal == "" }
+
+// Describe renders the status as a noun phrase, so a caller can drop it into a
+// sentence or a parenthesis without knowing which kind of ending it was.
+func (s ExitStatus) Describe() string {
+	if s.Signal != "" {
+		return s.Signal
+	}
+	return fmt.Sprintf("exit status %d", s.Code)
+}
+
+// RunProgram executes a program with extra environment variables and reports
+// how it ended, distinguishing a failure to launch from a program that ran and
+// failed.
+//
+// env is merged over the inherited environment. Nothing goes through a shell:
+// args is an argv slice, so a program argument beginning with '-' needs no
+// escaping and cannot be reinterpreted.
+func RunProgram(dir string, env []string, name string, args ...string) (ExitStatus, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	err := cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !asExitError(err, &exitErr) {
+			// Could not be started at all: a missing binary or a permission
+			// problem, which is cppm's or the build's fault rather than the
+			// program's.
+			return ExitStatus{Code: -1}, fmt.Errorf("run %s: %w", name, err)
+		}
+		return statusOf(exitErr.ProcessState), nil
+	}
+	return statusOf(cmd.ProcessState), nil
+}
+
+// statusOf reads an exit status out of a finished process.
+//
+// ProcessState.String() rather than syscall.WaitStatus, which would need a
+// build tag per platform for a string cppm only prints.
+func statusOf(ps *os.ProcessState) ExitStatus {
+	if ps == nil {
+		return ExitStatus{}
+	}
+	if ps.Exited() {
+		return ExitStatus{Code: ps.ExitCode()}
+	}
+	// "signal: aborted (core dumped)" -> "aborted". The core-dump note is
+	// about the system's limits rather than about the program, and it is the
+	// signal name that tells the user what happened.
+	sig := strings.TrimPrefix(ps.String(), "signal: ")
+	sig = strings.TrimSuffix(sig, " (core dumped)")
+	return ExitStatus{Code: -1, Signal: sig}
+}

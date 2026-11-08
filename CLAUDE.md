@@ -75,6 +75,14 @@ These are not style preferences. Breaking one is a bug even if the tests pass.
    test that uses the real tool: this one had passing unit tests, correct generated CMake, and did
    nothing.
 
+13. **A sanitizer launched outside CTest must be given its runtime options.** The halting options
+   (`ASAN_OPTIONS=abort_on_error=1` and the rest) live in the *test* preset's `environment` in
+   `CMakePresets.json`, and nothing applies them to a binary cppm executes itself. Without them a
+   sanitizer prints its finding and **exits 0** — the same silent pass as constraint 12, by another
+   route. `cppm run` sets them from `safety.Sanitizer.Env`; anything else that launches an
+   instrumented binary must too. A user-exported value is appended *after* cppm's, never instead of
+   it: these lists are read left to right and the last setting wins.
+
 If a task seems to require breaking one of these, say so and stop rather than working around it.
 The constraint is usually the point.
 
@@ -104,7 +112,7 @@ The constraint is usually the point.
 | `internal/sources` | expands `sourceGlobs` patterns; no cppm imports, so `manifest` can use it |
 | `internal/safety` | warning, hardening and sanitizer flag tables; valgrind options; dependency-flag scanning. No cppm imports either |
 | `internal/cmakegen` | the CMakeLists template and the managed include |
-| `internal/toolchain` | locates and runs cmake/ctest/ninja/git/compiler |
+| `internal/toolchain` | locates and runs cmake/ctest/ninja/git/compiler; reports how a launched program ended |
 | `internal/e2e` | drives the real binary against real CMake |
 
 ## Commit messages

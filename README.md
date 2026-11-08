@@ -90,6 +90,7 @@ v1 is three things: start a project, download a dependency, wire it into CMake.
 | `sync` / `apply` — apply cppm.json to CMake | Windows / macOS verification |
 | `build` — configure and build via presets | Non-CMake libraries |
 | `test` — build and run via CTest | |
+| `run` — build and run your program, under a sanitizer or valgrind if you ask | |
 | Warnings and release hardening, on by default | Static analysis (clang-tidy) |
 | Sanitizers: asan, ubsan, asan+ubsan, tsan | Generated CI stages |
 | Valgrind: memcheck, helgrind, drd, massif, cachegrind | |
@@ -113,6 +114,11 @@ cppm sync [--quiet]            aliases: apply, regen
 cppm build [--debug|--release] [--clean] [--jobs N] [--target T] [--verbose]
                                [--warnings off|default|strict|error]
                                [--sanitize asan|ubsan|asan+ubsan|tsan]
+cppm run  [--debug|--release] [--jobs N] [--target T] [--verbose] [--no-build]
+                               [--warnings off|default|strict|error]
+                               [--sanitize asan|ubsan|asan+ubsan|tsan]
+                               [--memcheck|--helgrind|--drd|--massif|--cachegrind]
+                               [--gen-suppressions] [-- program arguments]
 cppm test [--debug|--release] [--filter RE] [--jobs N] [--verbose] [--list] [--no-build] [--fail-fast]
                                [--warnings off|default|strict|error]
                                [--sanitize asan|ubsan|asan+ubsan|tsan]
@@ -283,6 +289,33 @@ The questions are skipped entirely when any flag is passed, when `--non-interact
 when the output is not a terminal — so a script or a CI job is never asked anything, and `cppm init`
 in a pipeline behaves exactly as it did before.
 
+## Running your program
+
+```bash
+cppm run                         # build the debug preset and run it
+cppm run --release
+cppm run -- --config a.toml -v   # everything after -- is your program's
+cppm run --target tools_cli      # when the project has several executables
+```
+
+The program runs with the project root as its working directory, and cppm exits
+with your program's exit status — so a script switching on an exit code sees
+what it would have seen running the binary directly.
+
+`run` also takes every flag from [Finding memory bugs and data
+races](#finding-memory-bugs-and-data-races), which is the point of it:
+
+```bash
+cppm run --sanitize=asan+ubsan   # check the real program, no test suite needed
+cppm run --memcheck              # leaks in the real program, no rebuild
+```
+
+The sanitizers instrument every line the compiler sees, `main()` included, and
+valgrind runs any binary — so neither ever needed a test suite. Use `run` to
+chase down a crash or a leak you can reproduce by hand, and `test` to keep it
+from coming back: a run only inspects the code paths you actually execute, and
+cannot be repeated in CI.
+
 ## Tests
 
 ```bash
@@ -437,7 +470,8 @@ ordinary `debug` build:
 
 ```bash
 cppm build --sanitize=asan+ubsan     # the usual pairing
-cppm test  --sanitize=asan+ubsan
+cppm test  --sanitize=asan+ubsan     # against the test suite
+cppm run   --sanitize=asan+ubsan     # against the real program
 cppm test  --sanitize=tsan           # data races and lock-order inversions
 ```
 
@@ -448,8 +482,8 @@ cppm test  --sanitize=tsan           # data races and lock-order inversions
 | `asan+ubsan` | both — what you want most of the time |
 | `tsan` | data races and lock-order inversions |
 
-`cppm test --sanitize=<name>` also sets the runtime options, which matter as
-much as the compile flags:
+`cppm test --sanitize=<name>` and `cppm run --sanitize=<name>` also set the
+runtime options, which matter as much as the compile flags:
 
 ```
 ASAN_OPTIONS=abort_on_error=1:detect_stack_use_after_return=1
@@ -459,7 +493,8 @@ TSAN_OPTIONS=second_deadlock_stack=1:halt_on_error=1
 
 Without those, UBSan in particular prints the error and carries on — your suite
 passes, CI goes green, and the undefined behaviour is still there. Every
-sanitizer cppm configures halts on the first error.
+sanitizer cppm configures halts on the first error. (A variable you have
+exported yourself is appended after cppm's, so it wins.)
 
 ### Valgrind
 
@@ -474,6 +509,17 @@ cppm test --drd           # lighter thread checker, better with many threads
 cppm test --massif        # heap profiler: what allocated memory, and when
 cppm test --cachegrind    # cache and branch-prediction profiler
 ```
+
+The same five flags work on `cppm run`, against the program itself rather than
+the test suite:
+
+```bash
+cppm run --memcheck              # the real program, with its real arguments
+cppm run --memcheck -- --config a.toml
+```
+
+Through `test` they go via CTest's memcheck support; through `run` cppm hands
+valgrind the binary directly.
 
 **`--memcheck` is the heap and memory checker.** It is the one to reach for when
 something is corrupting memory or growing without bound. It reports:
@@ -831,7 +877,7 @@ Anything prefixed `_cppm_` is private. To take over linking yourself, delete the
 - Git
 - A C++ compiler
 - Ninja (optional, but faster)
-- Valgrind (optional, Linux only — for `cppm test --memcheck` and `--helgrind`)
+- Valgrind (optional, Linux only — for `cppm test --memcheck`, `cppm run --memcheck` and `--helgrind`)
 
 The sanitizers need no extra tool: `--sanitize=asan+ubsan` and `--sanitize=tsan`
 work with any reasonably current GCC or Clang, and `--sanitize=asan` works with
