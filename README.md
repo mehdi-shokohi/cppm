@@ -10,6 +10,12 @@ cppm build
 cppm test
 ```
 
+## Demo
+
+<video src="https://github.com/user-attachments/assets/dfe4c00c-6506-40ba-afcf-db7939a135a8" controls width="100%"></video>
+
+[Watch the demo](https://github.com/user-attachments/assets/dfe4c00c-6506-40ba-afcf-db7939a135a8) — scaffold a project, pin a dependency, build and test it.
+
 ## Install
 
 Linux and macOS:
@@ -40,10 +46,6 @@ A **project scaffolder, a dependency pinner, and a wrapper over CMake presets an
 
 cppm generates CMake and shells out to `cmake`, `ninja` and `git`. It is not a build system and it
 does not replace CMake.
-
-
-https://github.com/user-attachments/assets/dfe4c00c-6506-40ba-afcf-db7939a135a8
-
 
 ## What cppm is not
 
