@@ -23,7 +23,9 @@ A tag is plain semver and names a release, not a roadmap item. `v0.2.3` is the r
 Earlier tags did encode the roadmap: `v0.2.2` meant "roadmap items through 0.2.2 are in", which left
 no room for a fixes-only release and forced a fourth component — `v0.2.2.1`, "`v0.2.2` plus fixes".
 That scheme is retired. Four-part tags are not used again and `v0.2.2.1` stays in the history. The
-0.2 line has since run to **`v0.2.5`**; the next tag, carrying 0.3.1, is **`v0.3.0`**.
+0.2 line ran to **`v0.2.5`**; **`v0.3.0`** followed, carrying item 0.3.1, and **`v0.3.1`** after it
+carries item 0.3.7. That the tag number and the item number coincide nowhere is the point of the
+scheme, not a mistake in it.
 
 The consequence is that **`v0.2` is closed to new features**: the 0.2 line now takes fixes only, and
 the safety work that was numbered 0.2.3 through 0.2.8 moved to [v0.3](#v03--making-your-c-project-safer)
@@ -251,6 +253,7 @@ every item below now has something to run.
 | 0.3.1 Warnings and hardening | **done** |
 | 0.3.3 Sanitizer presets | **done** |
 | 0.3.4 Valgrind, Helgrind and DRD | **done** |
+| 0.3.7 Ask before scaffolding | **done** — `v0.3.1` |
 | 0.3.2 Debug standard library | **next** |
 | 0.3.5 Static analysis | planned |
 | 0.3.6 CI stages | planned |
@@ -682,6 +685,28 @@ generating rather than documenting:
 - a commented `valgrind.supp` and a `.clang-tidy`
 - sanitizer environment defaults
 - `cppm ci --github` → the workflow above, with caching and the platform exclusions already correct
+
+### 0.3.7 Ask before scaffolding — **done**
+
+Every item above costs nothing to the user who already knows the flag exists. `--with-tests` is the
+one that matters most and the one a newcomer has no reason to guess, so the safety work was reaching
+mainly the people who knew to ask for it.
+
+`cppm init` with no flags, on a terminal, now asks for the name, kind, tests, standard and compiler,
+then prints the flag line that reproduces the answers — so the prompt teaches its own way out, and
+the second project need not be asked. Any flag, `--non-interactive`, or output that is not a
+terminal skips it entirely; a script or a CI job is never asked anything.
+
+Two things that were not obvious:
+
+- **Gating a prompt on stdin alone is wrong.** `/dev/null` is a character device, so
+  `ModeCharDevice` is set for a redirected stdin, and a CI job running a bare `cppm init` would
+  have been interrogated. Captured output is the reliable tell — a pipe is not a character device
+  — so both ends are checked.
+- **The test question defaults by kind**, yes for a library and no for an executable. A test target
+  can link a library, so that scaffold exercises real code from the first commit; an executable
+  cannot be linked into another target, so there the same scaffold is a test that can only check
+  itself. Offered, not defaulted — the same instinct as declining to guess a link target.
 
 ## v0.4 — Correctness and reproducibility
 
