@@ -112,10 +112,27 @@ build_from_source() {
     else
         say "  cloning https://github.com/$REPO"
         command -v git >/dev/null 2>&1 || die "git is required to clone the source"
-        git clone --quiet --depth 1 "https://github.com/$REPO" "$tmp/src"
+        # --branch <tag> or the clone ignores the requested version and builds
+        # whatever the default branch happens to be, which is not the release
+        # the user asked for.
+        if [ "$VERSION" = "latest" ]; then
+            git clone --quiet --depth 1 "https://github.com/$REPO" "$tmp/src"
+        else
+            git clone --quiet --depth 1 --branch "$VERSION" "https://github.com/$REPO" "$tmp/src" \
+                || die "no such version: $VERSION"
+        fi
         src="$tmp/src"
     fi
-    ( cd "$src" && go build -trimpath -ldflags "-s -w" -o "$tmp/cppm" ./cmd/cppm )
+    # Stamp the version when one was named. Go records the module version from
+    # VCS tags by itself, so a local checkout on a tag is labelled correctly
+    # without help -- but a --depth 1 clone carries no tags for it to read, and
+    # an unstamped build then falls back to the in-source "-dev" string and
+    # calls a real release a development build.
+    ldflags="-s -w"
+    if [ "$VERSION" != "latest" ] && [ "$src" != "." ]; then
+        ldflags="$ldflags -X main.version=$VERSION"
+    fi
+    ( cd "$src" && go build -trimpath -ldflags "$ldflags" -o "$tmp/cppm" ./cmd/cppm )
     install_binary "$tmp/cppm"
 }
 

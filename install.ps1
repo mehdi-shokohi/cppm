@@ -84,13 +84,27 @@ function Build-FromSource {
                 throw 'git is required to clone the source'
             }
             Write-Step "  cloning https://github.com/$Repo"
-            git clone --quiet --depth 1 "https://github.com/$Repo" "$tmp\src"
+            # --branch <tag>, or the clone ignores the requested version and
+            # builds whatever the default branch happens to be.
+            if ($Version -eq 'latest') {
+                git clone --quiet --depth 1 "https://github.com/$Repo" "$tmp\src"
+            } else {
+                git clone --quiet --depth 1 --branch $Version "https://github.com/$Repo" "$tmp\src"
+            }
             if ($LASTEXITCODE -ne 0) { throw 'git clone failed' }
             $src = "$tmp\src"
         }
+        # Stamp the version when one was named. Go reads the module version from
+        # VCS tags by itself, but a --depth 1 clone carries no tags for it to
+        # read, and an unstamped build then falls back to the in-source "-dev"
+        # string and calls a real release a development build.
+        $ldflags = '-s -w'
+        if ($Version -ne 'latest' -and $src -ne '.') {
+            $ldflags = "$ldflags -X main.version=$Version"
+        }
         Push-Location $src
         try {
-            & go build -trimpath -ldflags '-s -w' -o "$tmp\cppm.exe" ./cmd/cppm
+            & go build -trimpath -ldflags $ldflags -o "$tmp\cppm.exe" ./cmd/cppm
             if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
         } finally { Pop-Location }
         return Install-Binary "$tmp\cppm.exe"
