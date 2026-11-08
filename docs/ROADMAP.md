@@ -819,7 +819,7 @@ Releases that ship only fixes. Under plain semver these are ordinary patch relea
 [Versioning](#versioning) — and they never move an item's status in the tables above. `v0.2.2.1`
 predates that change and is the last four-part tag.
 
-### `v0.3.2`
+### `v0.3.3`
 
 Found by installing `v0.3.1` on a machine that had no release asset yet, and reading what it called
 itself.
@@ -834,6 +834,9 @@ itself.
   fallback. The symptom was visible precisely because the fallback had just been corrected: before
   `v0.3.1` it read `"0.2.3"` through three releases, so a source build printed a stale but
   release-looking number and nobody could tell.
+
+`v0.3.2` carries none of this: it was tagged on `v0.3.1`'s commit and ships identical code, so a
+source install of it still reports `0.3.1-dev`. The fix lands in `v0.3.3`.
 
 - **Both installers ignored `--version` when building from source.** The clone was `--depth 1` of
   the default branch whatever version was asked for, so `install.sh --version v0.2.5 --from-source`
